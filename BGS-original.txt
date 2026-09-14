@@ -6,74 +6,16 @@ local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 repeat task.wait() until Players.LocalPlayer
 local LocalPlayer = Players.LocalPlayer
-local CONFIG_URL = "http://51.77.216.96:6102/config.txt"
-local WEBHOOK_URL = "https://discord.com/api/webhooks/1532838003741818981/eqFssaXoJNc1Ltrad3B7BHhk0fFL72A_toWWr9w5uznS7BYAvdRr4jrj0FYR2DXwpvkd"
-local HOME_PLACE_ID = 2512643572
-local BGSI_PLACE_ID = 85896571713843
-local SERVER_API_BASE = "http://51.77.216.96:4564/"
-local REQUIRED_SETTINGS = {"Game", "competitiveLeaderboard", "leaderboards", "eggs", "pets", "bounties", "exists", "tradeScan", "scanning", "serverRank", "terminal"}
-local function fetchConfig()
-while true do
-local ok, body = pcall(function()
-return game:HttpGet(CONFIG_URL)
-end)
-if ok and type(body) == "string" then
-local decodedOk, config = pcall(function()
-return HttpService:JSONDecode(body)
-end)
-if decodedOk and type(config) == "table" and type(config.defaults) == "table" and type(config.users) == "table" then
-local valid = true
-for _, key in ipairs(REQUIRED_SETTINGS) do
-if config.defaults[key] == nil then
-valid = false
-break
+local BGS = (type(getgenv) == "function" and getgenv() or _G).BGS_CONFIG
+if type(BGS) ~= "table" or type(BGS.Settings) ~= "table" then
+	error("BGS: missing private loader configuration")
 end
-end
-if valid then
-return config
-end
-end
-end
-task.wait(5)
-end
-end
-local function matchesUser(entry, player)
-return tonumber(entry.userId) == player.UserId or (type(entry.username) == "string" and entry.username:lower() == player.Name:lower())
-end
-local function getSettings(config, player)
-local settings = {}
-for key, value in pairs(config.defaults) do
-settings[key] = value
-end
-for _, entry in ipairs(config.users) do
-if type(entry) == "table" and matchesUser(entry, player) and type(entry.settings) == "table" then
-for key, value in pairs(entry.settings) do
-settings[key] = value
-end
-break
-end
-end
-return settings
-end
-local function isConfiguredUser(config, player)
-for _, entry in ipairs(config.users) do
-if type(entry) == "table" and matchesUser(entry, player) then
-return true
-end
-end
-return false
-end
+local Settings = BGS.Settings
 local function enabled(value)
-return value == true or tostring(value):upper() == "ON"
+	return value == true or tostring(value):upper() == "ON"
 end
-local Config = fetchConfig()
-if not isConfiguredUser(Config, LocalPlayer) then
-print("Config file doesnt include " .. LocalPlayer.Name)
-return
-end
-local Settings = getSettings(Config, LocalPlayer)
 local targetMode = tostring(Settings.Game or Settings.teleportTo or "BGS"):upper()
-local targetPlaceId = targetMode == "BGSI" and BGSI_PLACE_ID or HOME_PLACE_ID
+local targetPlaceId = targetMode == "BGSI" and BGS.BGSI_PLACE_ID or BGS.HOME_PLACE_ID
 if game.PlaceId ~= targetPlaceId then
 pcall(function()
 TeleportService:Teleport(targetPlaceId, LocalPlayer)
@@ -88,7 +30,7 @@ local ScanningEnabled = enabled(Settings.scanning)
 local ServerRank = math.max(1, tonumber(Settings.serverRank) or 1)
 local function selectServerRank()
 local ok, body = pcall(function()
-return game:HttpGet(SERVER_API_BASE .. tostring(game.PlaceId))
+return game:HttpGet(BGS.SERVER_API_BASE .. tostring(game.PlaceId))
 end)
 if not ok or type(body) ~= "string" then
 return
@@ -130,7 +72,7 @@ or request
 or (fluxus and fluxus.request)
 assert(HttpRequest, "Your executor does not provide an HTTP request function.")
 assert(
-type(WEBHOOK_URL) == "string" and WEBHOOK_URL:find("discord", 1, true),
+type(BGS.WEBHOOK_URL) == "string" and BGS.WEBHOOK_URL:find("discord", 1, true),
 "Set WEBHOOK_URL before running the script."
 )
 LocalPlayer.Idled:Connect(function()
@@ -988,8 +930,8 @@ Leaderboards = LeaderboardsEnabled and collectLeaderboards() or {},
 CompetitiveLeaderboard = CompetitiveLeaderboardEnabled,
 ServerRank = ServerRank,
 TeleportTo = targetMode,
-HomePlaceId = HOME_PLACE_ID,
-BGSIPlaceId = BGSI_PLACE_ID,
+HomePlaceId = BGS.HOME_PLACE_ID,
+BGSIPlaceId = BGS.BGSI_PLACE_ID,
 PlayerProfiles = ScanningEnabled and collectPlayerProfiles() or {},
 }
 local json = HttpService:JSONEncode(output)
@@ -1032,7 +974,7 @@ Headers = {
 Body = body,
 })
 end
-local response = uploadJsonAttachment(WEBHOOK_URL, filename, json)
+local response = uploadJsonAttachment(BGS.WEBHOOK_URL, filename, json)
 local status = responseStatus(response)
 if status and status >= 200 and status < 300 then
 print(("Export uploaded successfully as %s (%d bytes)."):format(filename, #json))
@@ -1050,7 +992,7 @@ Pets = bountyCatalog,
 Schedule = output.SecretBounties,
 })
 local secretBountyFilename = ("secret_bounties_%s.json"):format(os.date("!%Y-%m-%d_%H-%M-%S"))
-local secretBountyResponse = uploadJsonAttachment(WEBHOOK_URL, secretBountyFilename, secretBountyJson)
+local secretBountyResponse = uploadJsonAttachment(BGS.WEBHOOK_URL, secretBountyFilename, secretBountyJson)
 local secretBountyStatus = responseStatus(secretBountyResponse)
 if not secretBountyStatus or secretBountyStatus < 200 or secretBountyStatus >= 300 then
 error(("Secret bounty webhook upload failed. Status: %s Body: %s"):format(
@@ -1100,7 +1042,7 @@ userid = player.UserId,
 inventory = inventory,
 })
 uploadJsonAttachment(
-WEBHOOK_URL,
+BGS.WEBHOOK_URL,
 ("inventory_%s_%d.json"):format(player.Name, player.UserId),
 payload
 )
