@@ -176,7 +176,8 @@ local function enqueueContents(kind, contents, priority)
 	if #contents > 4 * 1024 * 1024 then
 		error("BGS: " .. kind .. " exceeds the 4 MiB export budget; export smaller batches.")
 	end
-	if #runtime.Queue >= 64 then error("BGS: upload queue is full; refusing to discard data silently.") end
+	local limit = priority and 96 or 64
+	if #runtime.Queue >= limit then error("BGS: upload queue is full; refusing to discard data silently.") end
 	local item = {Name = kind .. ".json", Contents = contents, Priority = priority == true}
 	if priority then
 		local index = 1
@@ -1050,7 +1051,7 @@ local function collectBoards()
 		warnError("No public boards are loaded in this place. Checked Workspace and PlayerGui, including reparented SurfaceGuis. No empty leaderboard file was sent.")
 	end
 end
-local existsPending, existsDone = {}, {}
+local existsPending, existsDone, existsAttempted = {}, {}, {}
 local function rememberExists(pets)
 	if not ExistsEnabled then return end
 	for _, pet in pairs(pets) do
@@ -1118,54 +1119,149 @@ local function timestamp()
 	local ok, value = pcall(workspace.GetServerTimeNow, workspace)
 	return ok and type(value) == "number" and value or os.time()
 end
-local inventoryLocks, tradePending = {}, {}
-local inventoryInFlight = 0
+local scanQueues = {trade = {}, public = {}, normal = {}}
+local scanPending, inventoryPrivate, privacyGeneration = {}, {}, {}
+local requestBusy = false
+local nextInventoryAt, nextTradeAt = 0, 0
+local function pendingScans()
+	return #scanQueues.trade + #scanQueues.public + #scanQueues.normal
+end
 local function fetchInventory(player)
-	local deadline = os.clock() + 15
-	while runtime.Running and (inventoryLocks[player] or inventoryInFlight >= 3) and os.clock() < deadline do
-		task.wait(0.05)
-	end
-	if not runtime.Running or inventoryLocks[player] or inventoryInFlight >= 3 then
-		return false, "Inventory request capacity timed out."
-	end
+	if not runtime.Running then return false, "Exporter stopped." end
 	if player.Parent ~= Players then return false, "Player left before inventory capture." end
+	if inventoryPrivate[player] then return true, nil, nil, "Inventory is private." end
 	local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
 	if not remote or not remote:IsA("RemoteFunction") then return false, "Inventory remote is unavailable." end
-	inventoryLocks[player] = true
-	inventoryInFlight = inventoryInFlight + 1
+	local generation = privacyGeneration[player]
 	local startedAt = timestamp()
 	local ok, inventory, reason = bounded(12, remote.InvokeServer, remote, "TradeViewInventory", player)
-	inventoryLocks[player] = nil
-	inventoryInFlight = inventoryInFlight - 1
 	if not ok then return false, redact(inventory), startedAt end
+	if inventoryPrivate[player] or privacyGeneration[player] ~= generation or player.Parent ~= Players then
+		return true, nil, startedAt, "Inventory privacy changed or player left during capture; response discarded."
+	end
 	if type(inventory) ~= "table" or type(inventory.Pets) ~= "table" then
 		return true, nil, startedAt, redact(reason or "Server did not grant an inventory view.")
 	end
 	return true, inventory, startedAt
 end
+local function cancelInventoryScan(player)
+	local job = scanPending[player]
+	if not job then return end
+	for _, queue in ipairs({scanQueues.public, scanQueues.normal}) do
+		local index = table.find(queue, job)
+		if index then table.remove(queue, index) end
+	end
+	scanPending[player] = nil
+end
+local function queueInventory(player, reason)
+	if not ScanningEnabled or not runtime.Running or player.Parent ~= Players or inventoryPrivate[player] then return end
+	local priority = reason == "inventory_public"
+	local existing = scanPending[player]
+	if existing then
+		if priority and existing.reason ~= reason then
+			local index = table.find(scanQueues.normal, existing)
+			if index then
+				table.remove(scanQueues.normal, index)
+				existing.reason = reason
+				table.insert(scanQueues.public, existing)
+			end
+		end
+		return
+	end
+	if #scanQueues.public + #scanQueues.normal >= 256 then
+		warnError("Inventory scan queue is full; " .. player.Name .. " will wait for the next scheduled pass.")
+		return
+	end
+	local job = {player = player, reason = reason}
+	scanPending[player] = job
+	table.insert(priority and scanQueues.public or scanQueues.normal, job)
+end
 local function collectInventories()
-	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteFunction")
-	assert(remote:IsA("RemoteFunction"), "BGS: NetworkRemoteFunction is not a RemoteFunction.")
 	local players = Players:GetPlayers()
 	table.sort(players, function(a, b) return a.UserId < b.UserId end)
-	for _, player in ipairs(players) do
-		if not runtime.Running then return end
-		if player.Parent == Players and not tradePending[player] then
-			local ok, inventory, _, reason = fetchInventory(player)
-			if not ok then
-				warnError(("Inventory request for %s failed: %s. Pausing this pass."):format(player.Name, tostring(inventory)))
-				return
+	for _, player in ipairs(players) do queueInventory(player, "scheduled") end
+end
+local function startInventoryQueue()
+	task.spawn(function()
+		while runtime.Running do
+			local now = os.clock()
+			local job
+			if not requestBusy and now >= nextTradeAt then
+				if #scanQueues.trade > 0 and #runtime.Queue < 96 then
+					job = table.remove(scanQueues.trade, 1)
+				elseif #scanQueues.trade == 0 and #runtime.Queue < 64 then
+					if #scanQueues.public > 0 then
+						job = table.remove(scanQueues.public, 1)
+					elseif now >= nextInventoryAt then
+						job = table.remove(scanQueues.normal, 1)
+					end
+				end
 			end
-			if type(inventory) == "table" and type(inventory.Pets) == "table" then
-				local record = inventoryRecord(player, inventory)
-				enqueue("inventory_" .. tostring(player.UserId), record)
-				rememberExists(inventory.Pets)
+			if job then
+				requestBusy = true
+				if not job.capture then scanPending[job.player] = nil end
+				local ok, err = pcall(function()
+					if job.capture then
+						job.capture()
+						return
+					end
+					local player = job.player
+					if player.Parent ~= Players or inventoryPrivate[player] then return end
+					local success, inventory, startedAt, reason = fetchInventory(player)
+					if success and inventory then
+						local record = inventoryRecord(player, inventory)
+						record.reason = job.reason
+						record.snapshotStartedAt = startedAt
+						record.snapshotCapturedAt = timestamp()
+						enqueue("inventory_" .. tostring(player.UserId), record)
+						rememberExists(inventory.Pets)
+					else
+						warnError(("Inventory unavailable for %s: %s."):format(player.Name, tostring(reason or inventory)))
+					end
+				end)
+				requestBusy = false
+				nextTradeAt = os.clock() + 0.25
+				if not job.capture then nextInventoryAt = os.clock() + 3.5 end
+				if not ok then warnError("Queued inventory capture failed: " .. tostring(err)) end
 			else
-				warnError(("Inventory unavailable for %s: %s. No data was exported for this player."):format(player.Name, tostring(reason or "server did not grant an inventory view")))
+				task.wait(0.05)
 			end
-			task.wait(3.5)
 		end
-	end
+		table.clear(scanQueues.trade)
+		table.clear(scanQueues.public)
+		table.clear(scanQueues.normal)
+		table.clear(scanPending)
+	end)
+end
+local function observeInventoryAccess()
+	local connections = {}
+	table.insert(connections, Players.PlayerAdded:Connect(function(player)
+		queueInventory(player, "player_joined")
+	end))
+	table.insert(connections, Players.PlayerRemoving:Connect(function(player)
+		cancelInventoryScan(player)
+		inventoryPrivate[player], privacyGeneration[player] = nil, nil
+	end))
+	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteEvent")
+	assert(remote:IsA("RemoteEvent"), "BGS: inventory privacy event remote is unavailable.")
+	table.insert(connections, remote.OnClientEvent:Connect(function(event, player, private)
+		if not runtime.Running or event ~= "InventoryPrivacyChanged" then return end
+		if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players or type(private) ~= "boolean" then return end
+		if inventoryPrivate[player] == private then return end
+		inventoryPrivate[player] = private
+		privacyGeneration[player] = (privacyGeneration[player] or 0) + 1
+		if private then
+			cancelInventoryScan(player)
+		else
+			queueInventory(player, "inventory_public")
+		end
+	end))
+	task.spawn(function()
+		while runtime.Running do task.wait(1) end
+		for _, connection in ipairs(connections) do connection:Disconnect() end
+		table.clear(inventoryPrivate)
+		table.clear(privacyGeneration)
+	end)
 end
 local function collectExists()
 	if not next(existsPending) then return end
@@ -1177,13 +1273,29 @@ local function collectExists()
 	end
 	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteFunction")
 	assert(remote:IsA("RemoteFunction"), "BGS: missing inventory/exists remote.")
-	local keys, rows = {}, {}
+	local keys, rows, completed = {}, {}, {}
 	for key in pairs(existsPending) do table.insert(keys, key) end
-	table.sort(keys)
+	table.sort(keys, function(a, b)
+		local left, right = existsAttempted[a] or -1, existsAttempted[b] or -1
+		return left < right or left == right and a < b
+	end)
 	for i = 1, math.min(#keys, 50) do
+		while runtime.Running and (requestBusy or pendingScans() > 0 or os.clock() < nextTradeAt or #runtime.Queue >= 64) do
+			task.wait(0.1)
+		end
+		if not runtime.Running then break end
+		if gate() ~= true then
+			warnError("Exists viewing was disabled; remaining queries are postponed.")
+			break
+		end
 		local key = keys[i]
 		local pet = existsPending[key]
-		local ok, counts = bounded(10, remote.InvokeServer, remote, "GetPetExistsCount", pet.name, pet.shiny)
+		existsAttempted[key] = os.clock()
+		requestBusy = true
+		local ran, ok, counts = pcall(bounded, 10, remote.InvokeServer, remote, "GetPetExistsCount", pet.name, pet.shiny)
+		requestBusy = false
+		nextTradeAt = os.clock() + 0.25
+		if not ran then ok, counts = false, ok end
 		if not ok then
 			warnError("Exists request failed; remaining queries are postponed.")
 			break
@@ -1192,13 +1304,20 @@ local function collectExists()
 			local row = table.clone(counts)
 			row.name, row.shiny = pet.name, pet.shiny
 			table.insert(rows, row)
-			existsPending[key], existsDone[key] = nil, true
+			table.insert(completed, key)
 		else
 			warnError("Exists count unavailable for " .. pet.name .. "; no value was invented.")
 		end
 		task.wait(1.5)
 	end
-	if #rows > 0 then enqueue("pet_exists", rows) end
+	if #rows > 0 then
+		while runtime.Running and #runtime.Queue >= 64 do task.wait(0.25) end
+		if not runtime.Running then return end
+		enqueue("pet_exists", rows)
+		for _, key in ipairs(completed) do
+			existsPending[key], existsDone[key], existsAttempted[key] = nil, true, nil
+		end
+	end
 end
 local function tradingValue(value)
 	if value == nil then return false end
@@ -1216,12 +1335,15 @@ local function observeTrades()
 	local names = configured and {configured} or {"Trading", "IsTrading", "TradeStatus", "TradeState", "Trade"}
 	local candidates = {}
 	for _, name in ipairs(names) do candidates[name] = true end
-	local function startWorker(player, state)
-		if state.working then return end
-		state.working = true
-		task.spawn(function()
-			while runtime.Running and #state.queue > 0 do
-				local event = table.remove(state.queue, 1)
+	local function queueTrade(player, state, event)
+		if #scanQueues.trade >= 256 or state.pending >= 32 then
+			warnError("Trade snapshot queue is full for " .. player.Name .. "; transition " .. event.sequence .. " could not be captured.")
+			return
+		end
+		state.pending = state.pending + 1
+		table.insert(scanQueues.trade, {
+			player = player,
+			capture = function()
 				local captured, err = pcall(function()
 					local ok, inventory, startedAt, reason = fetchInventory(player)
 					local record
@@ -1242,17 +1364,13 @@ local function observeTrades()
 					enqueue(event.type .. "_" .. player.UserId .. "_" .. event.sequence, record, true)
 				end)
 				if not captured then warnError("Trade snapshot failed for " .. player.Name .. ": " .. tostring(err)) end
-				tradePending[player] = math.max(0, (tradePending[player] or 1) - 1)
-				if tradePending[player] == 0 then tradePending[player] = nil end
-				task.wait(0.25)
-			end
-			state.working = false
-			if not runtime.Running then tradePending[player] = nil end
-		end)
+				state.pending = state.pending - 1
+			end,
+		})
 	end
 	local function watch(player)
 		if watched[player] or player.Parent ~= Players then return end
-		local state = {trading = false, generation = 0, queue = {}}
+		local state = {trading = false, generation = 0, pending = 0}
 		watched[player] = state
 		for _, name in ipairs(names) do
 			local value = player:GetAttribute(name)
@@ -1272,16 +1390,10 @@ local function observeTrades()
 			state.trading = value
 			state.generation = state.generation + 1
 			sequence = sequence + 1
-			if #state.queue >= 32 then
-				warnError("Trade snapshot queue is full for " .. player.Name .. "; transition " .. sequence .. " could not be captured.")
-				return
-			end
-			table.insert(state.queue, {
+			queueTrade(player, state, {
 				type = value and "trade_started" or "trade_ended", attribute = name,
 				observedAt = timestamp(), generation = state.generation, sequence = sequence,
 			})
-			tradePending[player] = (tradePending[player] or 0) + 1
-			startWorker(player, state)
 		end)
 	end
 	local added = Players.PlayerAdded:Connect(watch)
@@ -1311,16 +1423,28 @@ end
 local function snapshotStages()
 	if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboards", collectBoards) end
 	if ScanningEnabled then
-		stage("inventories", function()
-			collectInventories()
-			if ExistsEnabled then stage("pet_exists", collectExists, 180) end
-		end, 600)
+		stage("inventories", collectInventories, 30)
 	end
+end
+if ScanningEnabled or TradeScanEnabled then
+	stage("inventory_access_observer", observeInventoryAccess, 30)
+	startInventoryQueue()
 end
 if TradeScanEnabled then stage("trade_observer", observeTrades, 30) end
 snapshotStages()
 if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
 if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
+if ExistsEnabled then
+	task.spawn(function()
+		while runtime.Running do
+			local ok, err = pcall(collectExists)
+			if not ok then
+				warnError("Exists scan failed: " .. tostring(err))
+			end
+			task.wait(30)
+		end
+	end)
+end
 task.spawn(function()
 	local day = math.floor(os.time() / 86400)
 	task.wait(300)
