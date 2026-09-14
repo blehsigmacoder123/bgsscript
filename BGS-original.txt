@@ -956,7 +956,7 @@ local function collectBounties()
 	local schedule = {}
 	local today = math.floor(os.time() / 86400) * 86400
 	if service then
-		for offset = 1, BOUNTY_DAYS do
+		for offset = 0, BOUNTY_DAYS do
 			local timestamp = today + offset * 86400
 			local ok, value = bounded(5, service.Get, service, timestamp)
 			if ok and type(value) == "table" and type(value.Name) == "string" and type(value.Egg) == "string"
@@ -970,12 +970,12 @@ local function collectBounties()
 		end
 	end
 	if not service then
-		for offset = 1, BOUNTY_DAYS do
+		for offset = 0, BOUNTY_DAYS do
 			schedule[offset] = predictBounty(today + offset * 86400, BountyModel.Eggs)
 		end
 	end
 	local entries = {}
-	for offset = 1, BOUNTY_DAYS do
+	for offset = 0, BOUNTY_DAYS do
 		local date = os.date("!%Y-%m-%d", today + offset * 86400)
 		local bounty = schedule[offset]
 		local fields = {
@@ -993,19 +993,23 @@ local function collectBounties()
 	end
 end
 local BoardNames = {BubbleBoard = "bubbles", HatchBoard = "hatches", BubblerBoard = "competitive_bubbles", EggBoard = "competitive_hatches"}
+local boardPanels, boardSignatures = {}, {}
+local boardRevision, boardNotice = 0, nil
 local function boardIdentity(node)
-	local period, adornee
+	local period, adornee, panel, surface
 	for _ = 1, 24 do
 		if not node then break end
-		if node.Name == "AllTime" or node.Name == "Weekly" or node.Name == "Daily" then period = node.Name end
-		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current" end
-		if node:IsA("SurfaceGui") then adornee = node.Adornee end
+		if node:IsA("GuiObject") and (node.Name == "AllTime" or node.Name == "Weekly" or node.Name == "Daily") then
+			period, panel = node.Name, node
+		end
+		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current", panel or surface end
+		if node:IsA("SurfaceGui") then surface, adornee = node, node.Adornee end
 		node = node.Parent
 	end
 	node = adornee
 	for _ = 1, 12 do
 		if not node then break end
-		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current" end
+		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current", panel or surface end
 		node = node.Parent
 	end
 end
@@ -1013,43 +1017,128 @@ local function textValue(root, name)
 	local node = root:FindFirstChild(name, true)
 	if node and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) then return node.Text end
 end
-local function collectBoards()
-	local roots, boards = {workspace}, {}
+local function boardEnabled(board)
+	local competitive = board:sub(1, 12) == "competitive_"
+	return competitive and CompetitiveLeaderboardEnabled or not competitive and LeaderboardsEnabled
+end
+local function rememberBoardPanel(node, changed)
+	if not node:IsA("GuiObject") and not node:IsA("SurfaceGui") then return end
+	local board, period, panel = boardIdentity(node)
+	if not board or not panel or not boardEnabled(board) then return end
+	if board:sub(1, 12) ~= "competitive_" and period == "current" then return end
+	local key = board .. "_" .. period:lower()
+	local known = boardPanels[key]
+	if not known or known.panel ~= panel then
+		boardPanels[key] = {panel = panel, sourcePath = panel:GetFullName(), lastAttachedAt = os.time()}
+		boardRevision = boardRevision + 1
+	elseif changed then
+		boardRevision = boardRevision + 1
+	end
+end
+local function discoverBoardPanels()
+	local roots = {workspace}
 	local gui = LocalPlayer:FindFirstChild("PlayerGui")
 	if gui then table.insert(roots, gui) end
 	for _, root in ipairs(roots) do
-		for index, frame in ipairs(root:GetDescendants()) do
-			if frame:IsA("GuiObject") and frame:FindFirstChild("NameBacking") then
-				local board, period = boardIdentity(frame)
-				local name, amount, rank = textValue(frame, "PlayerName"), textValue(frame, "Amount"), textValue(frame, "Rank")
-				if board and name and amount and rank then
-					local key = board .. "_" .. period:lower()
-					boards[key] = boards[key] or {}
-					local score = amount:gsub(",", "")
-					local row = {username = name, rank = tonumber(rank:match("%d+")), score = score}
-					local id = frame:GetAttribute("UserId")
-					if type(id) == "number" then row.userid = id end
-					table.insert(boards[key], row)
-				end
+		for index, node in ipairs(root:GetDescendants()) do
+			if node:IsA("SurfaceGui") or node.Name == "AllTime" or node.Name == "Weekly" or node.Name == "Daily" then
+				rememberBoardPanel(node)
 			end
 			if index % 1000 == 0 then task.wait(0.03) end
 		end
 	end
-	local exported = 0
-	for name, rows in pairs(boards) do
-		local competitive = name:sub(1, 12) == "competitive_"
-		if competitive and CompetitiveLeaderboardEnabled or not competitive and LeaderboardsEnabled then
-			table.sort(rows, function(a, b)
-				if a.rank ~= b.rank then return (a.rank or math.huge) < (b.rank or math.huge) end
-				return a.username < b.username
-			end)
-			enqueue(name, rows)
-			exported = exported + 1
+end
+local function collectBoards()
+	discoverBoardPanels()
+	local availability, missing = {}, {}
+	local gui = LocalPlayer:FindFirstChild("PlayerGui")
+	for key, info in pairs(boardPanels) do
+		local panel = info.panel
+		local attached = panel:IsDescendantOf(workspace) or gui ~= nil and panel:IsDescendantOf(gui)
+		if attached then info.lastAttachedAt = os.time() end
+		local rows, seen, invalid = {}, {}, 0
+		for _, frame in ipairs(panel:GetDescendants()) do
+			if frame:IsA("GuiObject") and frame:FindFirstChild("NameBacking") then
+				local name, amount, rankText = textValue(frame, "PlayerName"), textValue(frame, "Amount"), textValue(frame, "Rank")
+				local rank = rankText and tonumber(rankText:match("^%s*(%d+)"))
+				local score = amount and amount:gsub("[,%s]", "")
+				if name and name:match("%S") and rank and rank > 0 and score and score:match("^%d+$") then
+					local rowKey = tostring(rank) .. ":" .. name
+					if not seen[rowKey] then
+						seen[rowKey] = true
+						local row = {username = name, rank = rank, score = score}
+						local id = frame:GetAttribute("UserId")
+						if type(id) == "number" then row.userid = id end
+						table.insert(rows, row)
+					end
+				else
+					invalid = invalid + 1
+				end
+			end
+		end
+		table.sort(rows, function(a, b)
+			if a.rank ~= b.rank then return a.rank < b.rank end
+			return a.username < b.username
+		end)
+		availability[key] = {
+			rows = #rows, invalidRows = invalid, attached = attached == true,
+			sourcePath = info.sourcePath,
+			lastAttachedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ", info.lastAttachedAt),
+			source = attached and "replicated_ui" or "previously_observed_panel",
+		}
+		if #rows > 0 then
+			local signature = HttpService:JSONEncode(rows)
+			local previous = boardSignatures[key]
+			if not previous or previous.contents ~= signature or os.time() - previous.sentAt >= 300 then
+				enqueueContents(key, signature)
+				boardSignatures[key] = {contents = signature, sentAt = os.time()}
+			end
 		end
 	end
-	if exported == 0 then
-		warnError("No public boards are loaded in this place. Checked Workspace and PlayerGui, including reparented SurfaceGuis. No empty leaderboard file was sent.")
+	local expected = {}
+	if LeaderboardsEnabled then
+		for _, key in ipairs({"bubbles_alltime", "bubbles_weekly", "hatches_alltime", "hatches_weekly"}) do table.insert(expected, key) end
 	end
+	if CompetitiveLeaderboardEnabled then
+		table.insert(expected, "competitive_bubbles_current")
+		table.insert(expected, "competitive_hatches_current")
+	end
+	for _, key in ipairs(expected) do
+		if not availability[key] then availability[key] = {rows = 0, source = "not_observed"} end
+		if availability[key].rows == 0 then table.insert(missing, key) end
+	end
+	local notice = table.concat(missing, ", ")
+	if boardNotice == nil or boardNotice ~= notice then
+		if notice ~= "" then
+			warnError("Leaderboard rows not observed: " .. notice .. ". Inactive tabs can be detached, and boards may be absent from this place. Only replicated or previously observed panels can be exported.")
+		end
+		boardNotice = notice
+	end
+	enqueue("leaderboard_sources", {boards = availability, missing = missing, capturedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ")})
+end
+local function observeBoards()
+	local connections = {}
+	local revision = boardRevision
+	local function added(node)
+		if not runtime.Running then return end
+		rememberBoardPanel(node, true)
+	end
+	table.insert(connections, workspace.DescendantAdded:Connect(added))
+	table.insert(connections, workspace.DescendantRemoving:Connect(added))
+	table.insert(connections, LocalPlayer.DescendantAdded:Connect(added))
+	table.insert(connections, LocalPlayer.DescendantRemoving:Connect(added))
+	task.spawn(function()
+		while runtime.Running do
+			task.wait(5)
+			local current = runtime.Stages.leaderboards
+			if runtime.Running and revision ~= boardRevision and (not current or current.State ~= "running") then
+				revision = boardRevision
+				stage("leaderboards", collectBoards, 90)
+			end
+		end
+		for _, connection in ipairs(connections) do connection:Disconnect() end
+		table.clear(boardPanels)
+	end)
 end
 local existsPending, existsDone, existsAttempted = {}, {}, {}
 local function rememberExists(pets)
@@ -1426,6 +1515,7 @@ local function snapshotStages()
 		stage("inventories", collectInventories, 30)
 	end
 end
+if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboard_observer", observeBoards, 30) end
 if ScanningEnabled or TradeScanEnabled then
 	stage("inventory_access_observer", observeInventoryAccess, 30)
 	startInventoryQueue()
