@@ -1,0 +1,1114 @@
+repeat task.wait() until game:IsLoaded()
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+repeat task.wait() until Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+local CONFIG_URL = "http://51.77.216.96:6102/config.txt"
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1532838003741818981/eqFssaXoJNc1Ltrad3B7BHhk0fFL72A_toWWr9w5uznS7BYAvdRr4jrj0FYR2DXwpvkd"
+local HOME_PLACE_ID = 2512643572
+local BGSI_PLACE_ID = 85896571713843
+local SERVER_API_BASE = "http://51.77.216.96:4564/"
+local REQUIRED_SETTINGS = {"Game", "competitiveLeaderboard", "leaderboards", "eggs", "pets", "bounties", "exists", "tradeScan", "scanning", "serverRank", "terminal"}
+local function fetchConfig()
+while true do
+local ok, body = pcall(function()
+return game:HttpGet(CONFIG_URL)
+end)
+if ok and type(body) == "string" then
+local decodedOk, config = pcall(function()
+return HttpService:JSONDecode(body)
+end)
+if decodedOk and type(config) == "table" and type(config.defaults) == "table" and type(config.users) == "table" then
+local valid = true
+for _, key in ipairs(REQUIRED_SETTINGS) do
+if config.defaults[key] == nil then
+valid = false
+break
+end
+end
+if valid then
+return config
+end
+end
+end
+task.wait(5)
+end
+end
+local function matchesUser(entry, player)
+return tonumber(entry.userId) == player.UserId or (type(entry.username) == "string" and entry.username:lower() == player.Name:lower())
+end
+local function getSettings(config, player)
+local settings = {}
+for key, value in pairs(config.defaults) do
+settings[key] = value
+end
+for _, entry in ipairs(config.users) do
+if type(entry) == "table" and matchesUser(entry, player) and type(entry.settings) == "table" then
+for key, value in pairs(entry.settings) do
+settings[key] = value
+end
+break
+end
+end
+return settings
+end
+local function isConfiguredUser(config, player)
+for _, entry in ipairs(config.users) do
+if type(entry) == "table" and matchesUser(entry, player) then
+return true
+end
+end
+return false
+end
+local function enabled(value)
+return value == true or tostring(value):upper() == "ON"
+end
+local Config = fetchConfig()
+if not isConfiguredUser(Config, LocalPlayer) then
+print("Config file doesnt include " .. LocalPlayer.Name)
+return
+end
+local Settings = getSettings(Config, LocalPlayer)
+local targetMode = tostring(Settings.Game or Settings.teleportTo or "BGS"):upper()
+local targetPlaceId = targetMode == "BGSI" and BGSI_PLACE_ID or HOME_PLACE_ID
+if game.PlaceId ~= targetPlaceId then
+pcall(function()
+TeleportService:Teleport(targetPlaceId, LocalPlayer)
+end)
+return
+end
+local CompetitiveLeaderboardEnabled = enabled(Settings.competitiveLeaderboard)
+local LeaderboardsEnabled = enabled(Settings.leaderboards)
+local ExistsEnabled = enabled(Settings.exists)
+local TradeScanEnabled = enabled(Settings.tradeScan)
+local ScanningEnabled = enabled(Settings.scanning)
+local ServerRank = math.max(1, tonumber(Settings.serverRank) or 1)
+local function selectServerRank()
+local ok, body = pcall(function()
+return game:HttpGet(SERVER_API_BASE .. tostring(game.PlaceId))
+end)
+if not ok or type(body) ~= "string" then
+return
+end
+local decodedOk, decoded = pcall(function()
+return HttpService:JSONDecode(body)
+end)
+if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+return
+end
+table.sort(decoded.data, function(a, b)
+return (tonumber(a.playing) or 0) > (tonumber(b.playing) or 0)
+end)
+local target = decoded.data[ServerRank]
+if target and target.id and target.id ~= game.JobId then
+pcall(function()
+TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
+end)
+end
+end
+task.spawn(function()
+task.wait(1)
+selectServerRank()
+while true do
+task.wait(900)
+selectServerRank()
+end
+end)
+local BOUNTY_DAYS = 14
+local IMAGE_FALLBACK = "N/A"
+local THUMBNAIL_SIZE = "420x420"
+local THUMBNAIL_BATCH_SIZE = 100
+local THUMBNAIL_RETRIES = 3
+local HttpRequest =
+(syn and syn.request)
+or (http and http.request)
+or http_request
+or request
+or (fluxus and fluxus.request)
+assert(HttpRequest, "Your executor does not provide an HTTP request function.")
+assert(
+type(WEBHOOK_URL) == "string" and WEBHOOK_URL:find("discord", 1, true),
+"Set WEBHOOK_URL before running the script."
+)
+LocalPlayer.Idled:Connect(function()
+pcall(function()
+local camera = workspace.CurrentCamera
+VirtualUser:Button2Down(Vector2.new(0, 0), camera and camera.CFrame or CFrame.new())
+task.wait(1)
+VirtualUser:Button2Up(Vector2.new(0, 0), camera and camera.CFrame or CFrame.new())
+end)
+end)
+local SetIdentity =
+setthreadidentity
+or set_thread_identity
+or setidentity
+local GetIdentity =
+getthreadidentity
+or get_thread_identity
+or getidentity
+local function safeRequire(module)
+local previousIdentity
+if GetIdentity then
+pcall(function()
+previousIdentity = GetIdentity()
+end)
+end
+if SetIdentity then
+pcall(SetIdentity, 2)
+end
+local success, result = pcall(require, module)
+if SetIdentity and previousIdentity ~= nil then
+pcall(SetIdentity, previousIdentity)
+end
+if not success then
+error(("Failed to require %s: %s"):format(module:GetFullName(), tostring(result)), 2)
+end
+return result
+end
+local Assets = ReplicatedStorage:WaitForChild("Assets")
+local Modules = Assets:WaitForChild("Modules")
+local ItemDataFolder = Modules:WaitForChild("ItemDataService")
+local PetScript = ItemDataFolder:WaitForChild("PetModule")
+local HatScript = ItemDataFolder:WaitForChild("HatModule")
+local EggScript = ItemDataFolder:WaitForChild("EggModule")
+local CrateScript = ItemDataFolder:WaitForChild("CrateModule")
+local ImageScript = Modules:WaitForChild("ImageService")
+local EggServiceScript = Modules:FindFirstChild("EggService")
+local function readModuleSource(module)
+local success, source = pcall(function()
+return module.Source
+end)
+if success and type(source) == "string" and #source > 0 then
+return source
+end
+local decompiler = decompile
+if type(decompiler) ~= "function" and getgenv then
+local environment = getgenv()
+decompiler = environment and environment.decompile
+end
+if type(decompiler) == "function" then
+success, source = pcall(decompiler, module)
+if success and type(source) == "string" and #source > 0 then
+return source
+end
+end
+return nil
+end
+local function parseOriginalStatKeys(source)
+local result = {}
+if type(source) ~= "string" then
+return result
+end
+local currentName
+local readingBuffs = false
+for rawLine in source:gmatch("[^\r\n]+") do
+local line = rawLine:gsub("%-%-.*$", "")
+if readingBuffs then
+if line:match("^%s*}%s*,?%s*$") then
+readingBuffs = false
+else
+local key =
+line:match('^%s*%["(.-)"%]%s*=')
+or line:match("^%s*([%a_][%w_]*)%s*=")
+if key then
+table.insert(result[currentName], key)
+end
+end
+else
+local quotedName = line:match('^%s*%["(.-)"%]%s*=%s*{%s*,?%s*$')
+local plainName = line:match("^%s*([%a_][%w_]*)%s*=%s*{%s*,?%s*$")
+if quotedName then
+currentName = quotedName
+elseif plainName and plainName ~= "Buffs" then
+currentName = plainName
+end
+if currentName and line:match("^%s*Buffs%s*=%s*{%s*,?%s*$") then
+result[currentName] = {}
+readingBuffs = true
+end
+end
+end
+return result
+end
+local function escapeLuaPattern(value)
+return (tostring(value):gsub("([^%w])", "%%%1"))
+end
+local function addSecretName(lookup, name)
+if type(name) ~= "string" then
+return
+end
+name = name:gsub("\\'", "'")
+name = name:gsub('\\"', '"')
+name = name:match("^%s*(.-)%s*$") or name
+if name ~= "" then
+lookup[name] = true
+end
+end
+local function parseSecretPetNames(source)
+local lookup = {}
+if type(source) ~= "string" then
+return lookup
+end
+local listBlock = source:match("local%s+list%s*=%s*{(.-)}%s*local%s+t2")
+or source:match("local%s+list%s*=%s*{(.-)}")
+if listBlock then
+for name in listBlock:gmatch("[Nn]ame%s*=%s*\"(.-)\"") do
+addSecretName(lookup, name)
+end
+for name in listBlock:gmatch("[Nn]ame%s*=%s*'(.-)'") do
+addSecretName(lookup, name)
+end
+end
+return lookup
+end
+local petOriginalStatKeys = parseOriginalStatKeys(readModuleSource(PetScript))
+local hatOriginalStatKeys = parseOriginalStatKeys(readModuleSource(HatScript))
+local ImageService = safeRequire(ImageScript)
+local PetModule = safeRequire(PetScript)
+local HatModule = safeRequire(HatScript)
+local EggModule = safeRequire(EggScript)
+local CrateModule = safeRequire(CrateScript)
+assert(EggServiceScript, "EggService module was not found.")
+local SecretBountyScript = Modules:FindFirstChild("SecretBountyService")
+local secretPetLookup = parseSecretPetNames(readModuleSource(SecretBountyScript))
+assert(
+next(secretPetLookup) ~= nil,
+"Could not read SecretBountyService bounty pets; rarity export was stopped instead of guessing."
+)
+local function getPetRarity(name, data)
+local baseName = tostring(name):gsub("^Mythic%s+", "")
+if secretPetLookup[baseName] then
+return "Secret"
+end
+return data.Rarity or "N/A"
+end
+local SecretBountyService
+if SecretBountyScript then
+pcall(function()
+SecretBountyService = safeRequire(SecretBountyScript)
+end)
+end
+local function request(options)
+local success, response = pcall(HttpRequest, options)
+if not success or type(response) ~= "table" then
+return nil
+end
+return response
+end
+local function responseStatus(response)
+return tonumber(
+response
+and (
+response.StatusCode
+or response.Status
+or response.status_code
+or response.status
+)
+)
+end
+local function responseBody(response)
+if not response then
+return nil
+end
+return response.Body or response.body or response.ResponseBody
+end
+local function getHeader(headers, wantedName)
+if type(headers) ~= "table" then
+return nil
+end
+wantedName = wantedName:lower()
+for key, value in pairs(headers) do
+if tostring(key):lower() == wantedName then
+return value
+end
+end
+return nil
+end
+local function cleanStableImageUrl(value)
+if type(value) ~= "string" then
+return nil
+end
+value = value:gsub("\\u0026", "&")
+value = value:match("^%s*(.-)%s*$") or value
+if not value:match("^https://tr%.rbxcdn%.com/") then
+return nil
+end
+return value:match("^[^?]+")
+end
+local function extractAssetId(value)
+if type(value) == "number" then
+return tostring(math.floor(value))
+end
+if type(value) ~= "string" then
+return nil
+end
+return value:match("rbxassetid://(%d+)")
+or value:match("[?&]id=(%d+)")
+or value:match("rbxthumb://.-id=(%d+)")
+or value:match("^%s*(%d+)%s*$")
+end
+local function getRawImage(name)
+local success, image = pcall(ImageService, name)
+if success then
+return image
+end
+return nil
+end
+local function sortedModuleNames(module, excludedNames)
+local names = {}
+for name, data in pairs(module) do
+if type(name) == "string"
+and type(data) == "table"
+and not (excludedNames and excludedNames[name])
+then
+table.insert(names, name)
+end
+end
+table.sort(names)
+return names
+end
+local petNames = sortedModuleNames(PetModule)
+local hatNames = sortedModuleNames(HatModule)
+local eggNames = sortedModuleNames(EggModule, { Products = true })
+local crateNames = sortedModuleNames(CrateModule, { Products = true })
+local eggProductNames = sortedModuleNames(EggModule.Products or {}, { Rarities = true })
+local crateProductNames = sortedModuleNames(CrateModule.Products or {}, { Rarities = true })
+local rawImagesByName = {}
+local assetIds = {}
+local assetIdSet = {}
+local function registerImage(name)
+if type(name) ~= "string" or rawImagesByName[name] ~= nil then
+return
+end
+local rawImage = getRawImage(name)
+rawImagesByName[name] = rawImage or false
+if cleanStableImageUrl(rawImage) then
+return
+end
+local assetId = extractAssetId(rawImage)
+if assetId and not assetIdSet[assetId] then
+assetIdSet[assetId] = true
+table.insert(assetIds, assetId)
+end
+end
+for _, name in ipairs(petNames) do
+registerImage(name)
+end
+for _, name in ipairs(hatNames) do
+registerImage(name)
+end
+for _, name in ipairs(eggNames) do
+registerImage(name)
+end
+for _, name in ipairs(crateNames) do
+registerImage(name)
+end
+for _, name in ipairs(eggProductNames) do
+registerImage(name)
+end
+for _, name in ipairs(crateProductNames) do
+registerImage(name)
+end
+local function parseBountyCatalog(source)
+local catalog = {}
+local activeBounties = {}
+if type(source) ~= "string" then
+return catalog, activeBounties
+end
+for block in source:gmatch("{(.-)}") do
+local name = block:match("[Nn]ame%s*=%s*\"(.-)\"")
+or block:match("[Nn]ame%s*=%s*'(.-)'")
+local active = block:match("[Aa]ctive%s*=%s*true")
+local chance = tonumber(block:match("[Cc]hance%s*=%s*([%deE%+%-%.]+)"))
+if name then
+name = name:gsub("\\'", "'"):gsub('\\"', '"')
+local entry = {
+Name = name,
+Active = active ~= nil,
+Chance = chance,
+}
+table.insert(catalog, entry)
+if entry.Active and entry.Chance then
+table.insert(activeBounties, {
+Name = entry.Name,
+Chance = entry.Chance,
+})
+end
+end
+end
+return catalog, activeBounties
+end
+local bountyCatalog, BOUNTY_POOL = parseBountyCatalog(readModuleSource(SecretBountyScript))
+assert(#BOUNTY_POOL > 0, "Could not read active SecretBountyService bounties.")
+for _, bounty in ipairs(BOUNTY_POOL) do
+registerImage(bounty.Name)
+end
+table.sort(assetIds, function(left, right)
+return tonumber(left) < tonumber(right)
+end)
+local resolvedImagesByAssetId = {}
+local function fetchThumbnailBatch(batch)
+if #batch == 0 then
+return
+end
+local url =
+"https://thumbnails.roblox.com/v1/assets?assetIds="
+.. table.concat(batch, ",")
+.. "&size="
+.. THUMBNAIL_SIZE
+.. "&format=Png&isCircular=false"
+local response = request({
+Url = url,
+Method = "GET",
+Headers = {
+["Accept"] = "application/json",
+["User-Agent"] = "Mozilla/5.0",
+},
+})
+if responseStatus(response) ~= 200 then
+return
+end
+local body = responseBody(response)
+local success, decoded = pcall(HttpService.JSONDecode, HttpService, body or "")
+if not success or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+return
+end
+for _, item in ipairs(decoded.data) do
+local assetId = item.targetId and string.format("%.0f", item.targetId)
+local stableUrl = cleanStableImageUrl(item.imageUrl)
+if assetId and item.state == "Completed" and stableUrl then
+resolvedImagesByAssetId[assetId] = stableUrl
+end
+end
+end
+local unresolved = table.clone(assetIds)
+for attempt = 1, THUMBNAIL_RETRIES do
+for startIndex = 1, #unresolved, THUMBNAIL_BATCH_SIZE do
+local batch = {}
+local endIndex = math.min(startIndex + THUMBNAIL_BATCH_SIZE - 1, #unresolved)
+for index = startIndex, endIndex do
+table.insert(batch, unresolved[index])
+end
+fetchThumbnailBatch(batch)
+task.wait(0.1)
+end
+local nextUnresolved = {}
+for _, assetId in ipairs(unresolved) do
+if not resolvedImagesByAssetId[assetId] then
+table.insert(nextUnresolved, assetId)
+end
+end
+unresolved = nextUnresolved
+if #unresolved == 0 then
+break
+end
+if attempt < THUMBNAIL_RETRIES then
+task.wait(1.5)
+end
+end
+local function tryLegacyThumbnail(assetId)
+local url =
+"https://www.roblox.com/asset-thumbnail/image?assetId="
+.. assetId
+.. "&width=420&height=420&format=png"
+local methods = { "HEAD", "GET" }
+for _, method in ipairs(methods) do
+local response = request({
+Url = url,
+Method = method,
+Redirect = false,
+FollowRedirects = false,
+Headers = {
+["User-Agent"] = "Mozilla/5.0",
+},
+})
+if response then
+local candidates = {
+response.Url,
+response.URL,
+response.ResponseUrl,
+response.ResponseURL,
+response.FinalUrl,
+response.FinalURL,
+getHeader(response.Headers or response.headers, "location"),
+}
+for _, candidate in ipairs(candidates) do
+local stableUrl = cleanStableImageUrl(candidate)
+if stableUrl then
+return stableUrl
+end
+end
+local body = responseBody(response)
+if type(body) == "string" then
+local found = body:match("https://tr%.rbxcdn%.com/[^\"'%s<>]+")
+local stableUrl = cleanStableImageUrl(found)
+if stableUrl then
+return stableUrl
+end
+end
+end
+end
+return nil
+end
+if #unresolved > 0 then
+print(("Stable thumbnail API left %d unresolved images; trying decal redirect fallback..."):format(#unresolved))
+for index, assetId in ipairs(unresolved) do
+local stableUrl = tryLegacyThumbnail(assetId)
+if stableUrl then
+resolvedImagesByAssetId[assetId] = stableUrl
+end
+if index % 100 == 0 then
+print(("Checked %d/%d unresolved image assets..."):format(index, #unresolved))
+end
+task.wait(0.03)
+end
+end
+local function getImageUrl(name)
+local rawImage = rawImagesByName[name]
+if rawImage == nil then
+registerImage(name)
+rawImage = rawImagesByName[name]
+end
+local stableUrl = cleanStableImageUrl(rawImage)
+if stableUrl then
+return stableUrl
+end
+local assetId = extractAssetId(rawImage)
+if assetId then
+return resolvedImagesByAssetId[assetId] or IMAGE_FALLBACK
+end
+return IMAGE_FALLBACK
+end
+local function shallowArrayCopy(value)
+local output = {}
+if type(value) ~= "table" then
+return output
+end
+for index, item in ipairs(value) do
+output[index] = item
+end
+return output
+end
+local function serializeRarities(rarities)
+local output = {}
+if type(rarities) ~= "table" then
+return output
+end
+for _, rarity in ipairs(rarities) do
+if type(rarity) == "table" then
+table.insert(output, {
+Name = rarity[1],
+Chance = rarity[2],
+})
+end
+end
+return output
+end
+local function serializeCost(cost)
+if type(cost) ~= "table" then
+return nil
+end
+return {
+Currency = cost[1],
+Amount = cost[2],
+}
+end
+local function serializeAttributes(data, excluded)
+local attributes = {}
+for key, value in pairs(data) do
+if not excluded[key]
+and (
+type(value) == "boolean"
+or type(value) == "number"
+or type(value) == "string"
+)
+then
+attributes[key] = value
+end
+end
+return attributes
+end
+local function buildCurrencyHints(containerModule, itemModule)
+local hints = {}
+for containerName, containerData in pairs(containerModule) do
+if containerName ~= "Products"
+and type(containerData) == "table"
+and type(containerData.Cost) == "table"
+and type(containerData.Rarities) == "table"
+then
+local currency = containerData.Cost[1]
+if type(currency) == "string" then
+for _, rarity in ipairs(containerData.Rarities) do
+local itemName = type(rarity) == "table" and rarity[1]
+if type(itemName) == "string" and itemModule[itemName] then
+hints[itemName] = hints[itemName] or currency
+end
+end
+end
+end
+end
+return hints
+end
+local petCurrencyHints = buildCurrencyHints(EggModule, PetModule)
+local hatCurrencyHints = buildCurrencyHints(CrateModule, HatModule)
+local CORE_STATS = { "Bubbles", "Coins", "Gems" }
+local function baseItemName(name)
+if name:sub(1, 7) == "Mythic " then
+return name:sub(8)
+end
+return name
+end
+local function serializeStats(name, data, originalKeyMap, currencyHints)
+local stats = {}
+local buffs = data.Buffs
+if type(buffs) ~= "table" then
+return stats
+end
+local baseName = baseItemName(name)
+local originalKeys = originalKeyMap[name] or originalKeyMap[baseName]
+if type(originalKeys) == "table" and #originalKeys > 0 then
+for _, key in ipairs(originalKeys) do
+if buffs[key] ~= nil then
+stats[key] = buffs[key]
+end
+end
+return stats
+end
+if not data.SixCurrency then
+for key, value in pairs(buffs) do
+if type(value) == "number" then
+stats[key] = value
+end
+end
+return stats
+end
+for _, key in ipairs(CORE_STATS) do
+if buffs[key] ~= nil then
+stats[key] = buffs[key]
+end
+end
+local eventCurrency = currencyHints[name] or currencyHints[baseName]
+if eventCurrency and buffs[eventCurrency] ~= nil and stats[eventCurrency] == nil then
+stats[eventCurrency] = buffs[eventCurrency]
+end
+return stats
+end
+local output = {
+GeneratedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+PlaceId = game.PlaceId,
+GameId = game.GameId,
+Pets = {},
+Hats = {},
+Eggs = {},
+EggProducts = {},
+Crates = {},
+CrateProducts = {},
+SecretBountyPets = bountyCatalog,
+SecretBounties = {},
+}
+for _, name in ipairs(petNames) do
+local data = PetModule[name]
+table.insert(output.Pets, {
+Name = name,
+Rarity = getPetRarity(name, data),
+Stats = serializeStats(name, data, petOriginalStatKeys, petCurrencyHints),
+Attributes = serializeAttributes(data, {
+Buffs = true,
+Rarity = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+for _, name in ipairs(hatNames) do
+local data = HatModule[name]
+table.insert(output.Hats, {
+Name = name,
+Rarity = data.Rarity or "N/A",
+Stats = serializeStats(name, data, hatOriginalStatKeys, hatCurrencyHints),
+Attributes = serializeAttributes(data, {
+Buffs = true,
+Rarity = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+for _, name in ipairs(eggNames) do
+local data = EggModule[name]
+table.insert(output.Eggs, {
+Name = name,
+Cost = serializeCost(data.Cost),
+Ignore = shallowArrayCopy(data.Ignore),
+Rarities = serializeRarities(data.Rarities),
+Attributes = serializeAttributes(data, {
+Cost = true,
+Ignore = true,
+Rarities = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+for _, name in ipairs(eggProductNames) do
+local data = EggModule.Products[name]
+table.insert(output.EggProducts, {
+Name = name,
+Product = data.Product,
+Rarities = serializeRarities(data.Rarities),
+Attributes = serializeAttributes(data, {
+Product = true,
+Rarities = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+for _, name in ipairs(crateNames) do
+local data = CrateModule[name]
+table.insert(output.Crates, {
+Name = name,
+Cost = serializeCost(data.Cost),
+Ignore = shallowArrayCopy(data.Ignore),
+Rarities = serializeRarities(data.Rarities),
+Attributes = serializeAttributes(data, {
+Cost = true,
+Ignore = true,
+Rarities = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+for _, name in ipairs(crateProductNames) do
+local data = CrateModule.Products[name]
+table.insert(output.CrateProducts, {
+Name = name,
+Product = data.Product,
+Rarities = serializeRarities(data.Rarities),
+Attributes = serializeAttributes(data, {
+Product = true,
+Rarities = true,
+}),
+ImageURL = getImageUrl(name),
+})
+end
+local function buildPermutation(seed, count, salt)
+local permutation = {}
+for index = 1, count do
+permutation[index] = index
+end
+local random = Random.new(seed * 131 + salt)
+for index = count, 2, -1 do
+local swapIndex = random:NextInteger(1, index)
+permutation[index], permutation[swapIndex] = permutation[swapIndex], permutation[index]
+end
+return permutation
+end
+local function getRotatingIndex(seed, count, salt)
+local cycle = math.floor(seed / count)
+local current = buildPermutation(cycle, count, salt)
+if count > 2 then
+local previous = buildPermutation(cycle - 1, count, salt)
+if current[1] == previous[count] then
+current[1], current[2] = current[2], current[1]
+end
+end
+return current[seed % count + 1]
+end
+local function getSelectableBountyEggs()
+local names = {}
+local seen = {}
+local function add(name)
+if type(name) == "string"
+and name ~= ""
+and EggModule[name]
+and not seen[name]
+then
+seen[name] = true
+table.insert(names, name)
+end
+end
+if SecretBountyService and type(SecretBountyService.GetSelectableEggs) == "function" then
+local success, serviceEggs = pcall(function()
+return SecretBountyService:GetSelectableEggs()
+end)
+if success and type(serviceEggs) == "table" then
+for _, name in ipairs(serviceEggs) do
+add(name)
+end
+end
+end
+local worldEggs = workspace:FindFirstChild("Eggs")
+if worldEggs then
+for _, child in ipairs(worldEggs:GetChildren()) do
+local name = child.Name
+local rawImage = getRawImage(name)
+if name:sub(-3) == "Egg"
+and rawImage
+and rawImage ~= ""
+then
+add(name)
+end
+end
+end
+if #names < 2 then
+for _, name in ipairs(eggNames) do
+if name:sub(-3) == "Egg" then
+add(name)
+end
+end
+end
+if #names == 0 then
+for _, name in ipairs(eggNames) do
+add(name)
+end
+end
+table.sort(names)
+return names
+end
+local selectableBountyEggs = getSelectableBountyEggs()
+local now = os.time()
+for offset = 0, BOUNTY_DAYS - 1 do
+local timestamp = now + offset * 86400
+local bountyData
+if SecretBountyService and type(SecretBountyService.Get) == "function" then
+local success, result = pcall(function()
+return SecretBountyService:Get(timestamp)
+end)
+if success
+and type(result) == "table"
+and type(result.Name) == "string"
+and type(result.Chance) == "number"
+and type(result.Egg) == "string"
+then
+bountyData = result
+end
+end
+if not bountyData and #selectableBountyEggs > 0 then
+local seed = math.floor(timestamp / 86400) - 1
+local bounty = BOUNTY_POOL[getRotatingIndex(seed, #BOUNTY_POOL, 17)]
+local eggName = selectableBountyEggs[getRotatingIndex(seed, #selectableBountyEggs, 53)]
+bountyData = {
+Name = bounty.Name,
+Chance = bounty.Chance,
+Egg = eggName,
+}
+end
+if bountyData then
+table.insert(output.SecretBounties, {
+Date = os.date("!%Y-%m-%d", timestamp),
+Pet = bountyData.Name,
+Rarity = getPetRarity(bountyData.Name, PetModule[bountyData.Name] or {}),
+Egg = bountyData.Egg,
+Chance = bountyData.Chance,
+Odds = math.ceil(100 / bountyData.Chance),
+PetImageURL = getImageUrl(bountyData.Name),
+EggImageURL = getImageUrl(bountyData.Egg),
+})
+end
+end
+if #output.SecretBounties ~= BOUNTY_DAYS then
+warn(("Expected %d secret bounties but generated %d. Selectable eggs: %d"):format(
+BOUNTY_DAYS,
+#output.SecretBounties,
+#selectableBountyEggs
+))
+end
+local function collectNamedValues(root)
+local result = {}
+if not root then
+return result
+end
+for _, node in ipairs(root:GetDescendants()) do
+if node:IsA("ValueBase") then
+result[node:GetFullName()] = node.Value
+end
+end
+return result
+end
+local function collectLeaderboards()
+local result = {}
+for _, root in ipairs({ReplicatedStorage, workspace}) do
+for _, node in ipairs(root:GetDescendants()) do
+if node.Name:lower():find("leaderboard", 1, true) then
+result[node:GetFullName()] = collectNamedValues(node)
+end
+end
+end
+return result
+end
+local function collectExists()
+local result = {
+Enabled = false,
+Items = {},
+}
+local existsModule = Modules:FindFirstChild("IsExistsUiEnabled")
+if existsModule then
+local ok, enabledValue = pcall(function()
+return safeRequire(existsModule)()
+end)
+result.Enabled = ok and enabledValue == true
+end
+local existsFolder = ReplicatedStorage:FindFirstChild("Exists", true) or workspace:FindFirstChild("Exists", true)
+if existsFolder then
+result.Items = collectNamedValues(existsFolder)
+end
+return result
+end
+local function collectPlayerProfiles()
+local result = {}
+for _, player in ipairs(Players:GetPlayers()) do
+local stats = {}
+local leaderstats = player:FindFirstChild("leaderstats")
+if leaderstats then
+for _, stat in ipairs(leaderstats:GetChildren()) do
+if stat:IsA("ValueBase") then
+stats[stat.Name] = stat.Value
+end
+end
+end
+result[tostring(player.UserId)] = {
+Username = player.Name,
+DisplayName = player.DisplayName,
+UserId = player.UserId,
+Leaderstats = stats,
+}
+end
+return result
+end
+output.Features = {
+Eggs = enabled(Settings.eggs),
+Pets = enabled(Settings.pets),
+Bounties = enabled(Settings.bounties),
+Crates = #output.Crates > 0,
+Hats = #output.Hats > 0,
+Exists = ExistsEnabled and collectExists() or {Enabled = false, Items = {}},
+TradeScan = TradeScanEnabled,
+Scanning = ScanningEnabled,
+Leaderboards = LeaderboardsEnabled and collectLeaderboards() or {},
+CompetitiveLeaderboard = CompetitiveLeaderboardEnabled,
+ServerRank = ServerRank,
+TeleportTo = targetMode,
+HomePlaceId = HOME_PLACE_ID,
+BGSIPlaceId = BGSI_PLACE_ID,
+PlayerProfiles = ScanningEnabled and collectPlayerProfiles() or {},
+}
+local json = HttpService:JSONEncode(output)
+local filename = ("bgsi_export_%s.json"):format(os.date("!%Y-%m-%d_%H-%M-%S"))
+if writefile then
+pcall(writefile, filename, json)
+end
+local function uploadJsonAttachment(webhookUrl, attachmentName, contents)
+local boundary = "----------------BGSI" .. HttpService:GenerateGUID(false):gsub("-", "")
+local payloadJson = HttpService:JSONEncode({
+content = ("BGSI data export: %d pets, %d hats, %d eggs, %d crates, %d bounties."):format(
+#output.Pets,
+#output.Hats,
+#output.Eggs,
+#output.Crates,
+#output.SecretBounties
+),
+})
+local body = table.concat({
+"--" .. boundary,
+'Content-Disposition: form-data; name="payload_json"',
+"Content-Type: application/json",
+"",
+payloadJson,
+"--" .. boundary,
+('Content-Disposition: form-data; name="files[0]"; filename="%s"'):format(attachmentName),
+"Content-Type: application/json",
+"",
+contents,
+"--" .. boundary .. "--",
+"",
+}, "\r\n")
+return request({
+Url = webhookUrl,
+Method = "POST",
+Headers = {
+["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
+["User-Agent"] = "Mozilla/5.0",
+},
+Body = body,
+})
+end
+local response = uploadJsonAttachment(WEBHOOK_URL, filename, json)
+local status = responseStatus(response)
+if status and status >= 200 and status < 300 then
+print(("Export uploaded successfully as %s (%d bytes)."):format(filename, #json))
+else
+error(("Webhook upload failed. Status: %s Body: %s"):format(
+tostring(status),
+tostring(responseBody(response))
+))
+end
+local secretBountyJson = HttpService:JSONEncode({
+GeneratedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+PlaceId = game.PlaceId,
+GameId = game.GameId,
+Pets = bountyCatalog,
+Schedule = output.SecretBounties,
+})
+local secretBountyFilename = ("secret_bounties_%s.json"):format(os.date("!%Y-%m-%d_%H-%M-%S"))
+local secretBountyResponse = uploadJsonAttachment(WEBHOOK_URL, secretBountyFilename, secretBountyJson)
+local secretBountyStatus = responseStatus(secretBountyResponse)
+if not secretBountyStatus or secretBountyStatus < 200 or secretBountyStatus >= 300 then
+error(("Secret bounty webhook upload failed. Status: %s Body: %s"):format(
+tostring(secretBountyStatus),
+tostring(responseBody(secretBountyResponse))
+))
+end
+if TradeScanEnabled or ScanningEnabled then
+task.spawn(function()
+local remoteModule = ReplicatedStorage:FindFirstChild("Remote", true)
+local networkFunction = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+local remote
+if remoteModule and remoteModule:IsA("ModuleScript") then
+pcall(function()
+remote = require(remoteModule)
+end)
+end
+local function viewInventory(player)
+if remote and type(remote.InvokeServer) == "function" then
+return remote:InvokeServer("TradeViewInventory", player)
+end
+if networkFunction and networkFunction:IsA("RemoteFunction") then
+return networkFunction:InvokeServer("TradeViewInventory", player)
+end
+return nil
+end
+if not remote and not networkFunction then
+return
+end
+while true do
+for _, player in ipairs(Players:GetPlayers()) do
+if player ~= LocalPlayer and player:GetAttribute("InventoryViewingAllowed") == true then
+local ok, inventory = pcall(function()
+return viewInventory(player)
+end)
+if ok and type(inventory) == "table" then
+local payload = HttpService:JSONEncode({
+type = "inventory",
+time = os.time(),
+placeId = game.PlaceId,
+jobId = game.JobId,
+profile = {
+username = player.Name,
+displayname = player.DisplayName,
+userid = player.UserId,
+},
+inventory = inventory,
+})
+uploadJsonAttachment(
+WEBHOOK_URL,
+("inventory_%s_%d.json"):format(player.Name, player.UserId),
+payload
+)
+end
+task.wait(3.25)
+end
+end
+task.wait(10)
+end
+end)
+end
