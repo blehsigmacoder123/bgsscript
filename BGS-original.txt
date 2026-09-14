@@ -1,4 +1,5 @@
 local BGS_PAYLOAD_VERSION = "4"
+local BGS_PAYLOAD_REVISION = "trade-roster-board-loading-1"
 local suppliedConfig = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -37,7 +38,7 @@ type(BGS.WEBHOOK_URL) == "string" and BGS.WEBHOOK_URL:match("^https://discord%.c
 if environment.BGS_RUN and environment.BGS_RUN.Running then
 	error("BGS: an exporter is already running; rejoin before restarting it.")
 end
-local runtime = {Running = true, Version = BGS_PAYLOAD_VERSION, Stages = {}, Queue = {}, Sent = 0}
+local runtime = {Running = true, Version = BGS_PAYLOAD_VERSION, Revision = BGS_PAYLOAD_REVISION, Stages = {}, Queue = {}, Sent = 0}
 environment.BGS_RUN = runtime
 local function redact(value)
 	local text = tostring(value)
@@ -123,6 +124,7 @@ local function envelope(kind, data)
 		PlaceId = game.PlaceId,
 		JobId = game.JobId,
 		Version = BGS_PAYLOAD_VERSION,
+		Revision = BGS_PAYLOAD_REVISION,
 		Data = jsonSafe(data),
 	}
 end
@@ -225,7 +227,7 @@ local function stage(name, callback, timeout)
 		end
 	end)
 end
-log("Payload v" .. BGS_PAYLOAD_VERSION .. " loaded; checking webhook delivery")
+log("Payload v" .. BGS_PAYLOAD_VERSION .. " (" .. BGS_PAYLOAD_REVISION .. ") loaded; checking webhook delivery")
 local delivered, deliveryError = uploadJsonAttachment("startup.json", HttpService:JSONEncode(envelope("startup", {Message = "Exporter reached the webhook.", Settings = Settings})))
 if not delivered then
 	runtime.Running = false
@@ -950,7 +952,7 @@ local function collectBounties()
 		if ok and type(value) == "table" and type(value.Get) == "function" then
 			service = value
 		else
-			warnError("SecretBountyService could not load; using the inspected prediction model.")
+			log("Live bounty service unavailable; exporting predictions from the inspected model. Reason: " .. redact(value))
 		end
 	end
 	local schedule = {}
@@ -964,7 +966,7 @@ local function collectBounties()
 				schedule[offset] = value
 			else
 				service = nil
-				warnError("SecretBountyService.Get failed; the entire forecast will use the complete inspected model.")
+				log("Live bounty query unavailable; exporting the complete model forecast instead. Reason: " .. (ok and "invalid bounty response" or redact(value)))
 				break
 			end
 		end
@@ -989,12 +991,30 @@ local function collectBounties()
 	enqueueContents("bounties", "{\n" .. table.concat(entries, ",\n") .. "\n}")
 	if not service then
 		enqueue("bounties_model", {SnapshotDate = BountyModel.Date, EggSource = "complete_inspected_snapshot", Eggs = BountyModel.Eggs, Pets = BountyModel.Pets, FavoredEggs = BountyModel.FavoredEggs, FavoredEggWeight = BountyModel.FavoredEggWeight})
-		warnError("Bounty predictions assume the inspected " .. BountyModel.Date .. " rules remain unchanged.")
+		log("Bounty model export queued. These predictions assume the inspected " .. BountyModel.Date .. " rules remain unchanged; they are not live-verified.")
 	end
 end
 local BoardNames = {BubbleBoard = "bubbles", HatchBoard = "hatches", BubblerBoard = "competitive_bubbles", EggBoard = "competitive_hatches"}
 local boardPanels, boardSignatures = {}, {}
 local boardRevision, boardNotice = 0, nil
+local boardModels, boardMissing, boardSourceSignature = {}, true, nil
+local boardLastPoll = -math.huge
+local boardContext
+local function getBoardContext()
+	if boardContext then return boardContext end
+	boardContext = {placeId = game.PlaceId, gameId = game.GameId}
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local modules = assets and assets:FindFirstChild("Modules")
+	local module = modules and modules:FindFirstChild("TradingHangout")
+	if module then
+		local ok, value = bounded(3, require, module)
+		if ok and type(value) == "table" then
+			boardContext.tradingHangout = value.Enabled == true
+			boardContext.homePlaceId = value.HomePlaceId
+		end
+	end
+	return boardContext
+end
 local function boardIdentity(node)
 	local period, adornee, panel, surface
 	for _ = 1, 24 do
@@ -1015,7 +1035,11 @@ local function boardIdentity(node)
 end
 local function textValue(root, name)
 	local node = root:FindFirstChild(name, true)
-	if node and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) then return node.Text end
+	if node and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) then
+		local text = node.Text
+		if node.RichText then text = text:gsub("<[^>]*>", "") end
+		return text:match("^%s*(.-)%s*$")
+	end
 end
 local function boardEnabled(board)
 	local competitive = board:sub(1, 12) == "competitive_"
@@ -1036,11 +1060,13 @@ local function rememberBoardPanel(node, changed)
 	end
 end
 local function discoverBoardPanels()
+	table.clear(boardModels)
 	local roots = {workspace}
 	local gui = LocalPlayer:FindFirstChild("PlayerGui")
 	if gui then table.insert(roots, gui) end
 	for _, root in ipairs(roots) do
 		for index, node in ipairs(root:GetDescendants()) do
+			if BoardNames[node.Name] then boardModels[BoardNames[node.Name]] = node:GetFullName() end
 			if node:IsA("SurfaceGui") or node.Name == "AllTime" or node.Name == "Weekly" or node.Name == "Daily" then
 				rememberBoardPanel(node)
 			end
@@ -1049,6 +1075,7 @@ local function discoverBoardPanels()
 	end
 end
 local function collectBoards()
+	boardLastPoll = os.clock()
 	discoverBoardPanels()
 	local availability, missing = {}, {}
 	local gui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -1060,13 +1087,14 @@ local function collectBoards()
 		for _, frame in ipairs(panel:GetDescendants()) do
 			if frame:IsA("GuiObject") and frame:FindFirstChild("NameBacking") then
 				local name, amount, rankText = textValue(frame, "PlayerName"), textValue(frame, "Amount"), textValue(frame, "Rank")
-				local rank = rankText and tonumber(rankText:match("^%s*(%d+)"))
+				local rank = rankText and tonumber(rankText:match("^#?%s*(%d+)")) or tonumber(frame.Name)
 				local score = amount and amount:gsub("[,%s]", "")
-				if name and name:match("%S") and rank and rank > 0 and score and score:match("^%d+$") then
+				if name and name:match("%S") and rank and rank > 0 and rank % 1 == 0 and amount and amount:match("%S") then
 					local rowKey = tostring(rank) .. ":" .. name
 					if not seen[rowKey] then
 						seen[rowKey] = true
-						local row = {username = name, rank = rank, score = score}
+						local exact = score:match("^%d+$") ~= nil
+						local row = {username = name, rank = rank, score = exact and score or nil, scoreText = amount, scoreExact = exact}
 						local id = frame:GetAttribute("UserId")
 						if type(id) == "number" then row.userid = id end
 						table.insert(rows, row)
@@ -1085,6 +1113,7 @@ local function collectBoards()
 			sourcePath = info.sourcePath,
 			lastAttachedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ", info.lastAttachedAt),
 			source = attached and "replicated_ui" or "previously_observed_panel",
+			reason = #rows == 0 and (invalid > 0 and "unreadable_rows" or "rows_not_loaded") or nil,
 		}
 		if #rows > 0 then
 			local signature = HttpService:JSONEncode(rows)
@@ -1104,17 +1133,42 @@ local function collectBoards()
 		table.insert(expected, "competitive_hatches_current")
 	end
 	for _, key in ipairs(expected) do
-		if not availability[key] then availability[key] = {rows = 0, source = "not_observed"} end
+		if not availability[key] then
+			local board = key:gsub("_[^_]+$", "")
+			availability[key] = {
+				rows = 0, source = "not_observed",
+				reason = boardModels[board] and "period_not_loaded" or "board_not_replicated",
+			}
+		end
 		if availability[key].rows == 0 then table.insert(missing, key) end
 	end
 	local notice = table.concat(missing, ", ")
+	boardMissing = #missing > 0
+	local context = getBoardContext()
 	if boardNotice == nil or boardNotice ~= notice then
 		if notice ~= "" then
-			warnError("Leaderboard rows not observed: " .. notice .. ". Inactive tabs can be detached, and boards may be absent from this place. Only replicated or previously observed panels can be exported.")
+			if not next(boardModels) and not next(boardPanels) then
+				log("No leaderboard models are replicated in place " .. tostring(context.placeId)
+					.. (context.tradingHangout and " (trading hangout)" or "")
+					.. ". Waiting for public boards; no rankings were fabricated. See leaderboard_sources.json for place and loading details.")
+			else
+				log("Waiting for leaderboard periods: " .. notice .. ". Retrying loading checks every 15 seconds; loaded rows are exported independently.")
+			end
 		end
 		boardNotice = notice
 	end
-	enqueue("leaderboard_sources", {boards = availability, missing = missing, capturedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ")})
+	local diagnostic = {boards = availability, missing = missing, context = context, models = table.clone(boardModels)}
+	local stableBoards = {}
+	for key, info in pairs(availability) do
+		stableBoards[key] = table.clone(info)
+		stableBoards[key].lastAttachedAtUTC = nil
+	end
+	local signature = HttpService:JSONEncode({boards = stableBoards, missing = missing, context = context, models = diagnostic.models})
+	if boardSourceSignature ~= signature then
+		diagnostic.capturedAtUTC = os.date("!%Y-%m-%dT%H:%M:%SZ")
+		enqueue("leaderboard_sources", diagnostic)
+		boardSourceSignature = signature
+	end
 end
 local function observeBoards()
 	local connections = {}
@@ -1131,7 +1185,8 @@ local function observeBoards()
 		while runtime.Running do
 			task.wait(5)
 			local current = runtime.Stages.leaderboards
-			if runtime.Running and revision ~= boardRevision and (not current or current.State ~= "running") then
+			if runtime.Running and (revision ~= boardRevision or boardMissing and os.clock() - boardLastPoll >= 15)
+				and (not current or current.State ~= "running") then
 				revision = boardRevision
 				stage("leaderboards", collectBoards, 90)
 			end
@@ -1212,6 +1267,7 @@ local scanQueues = {trade = {}, public = {}, normal = {}}
 local scanPending, inventoryPrivate, privacyGeneration = {}, {}, {}
 local requestBusy = false
 local nextInventoryAt, nextTradeAt = 0, 0
+local tradeRosterPoll, tradeRosterNextAt = nil, math.huge
 local function pendingScans()
 	return #scanQueues.trade + #scanQueues.public + #scanQueues.normal
 end
@@ -1265,6 +1321,18 @@ local function queueInventory(player, reason)
 	scanPending[player] = job
 	table.insert(priority and scanQueues.public or scanQueues.normal, job)
 end
+local function updateInventoryPrivacy(player, private, baseline)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players or type(private) ~= "boolean" then return end
+	local previous = inventoryPrivate[player]
+	if previous == private then return end
+	inventoryPrivate[player] = private
+	privacyGeneration[player] = (privacyGeneration[player] or 0) + 1
+	if private then
+		cancelInventoryScan(player)
+	elseif not baseline or previous == true then
+		queueInventory(player, "inventory_public")
+	end
+end
 local function collectInventories()
 	local players = Players:GetPlayers()
 	table.sort(players, function(a, b) return a.UserId < b.UserId end)
@@ -1278,6 +1346,9 @@ local function startInventoryQueue()
 			if not requestBusy and now >= nextTradeAt then
 				if #scanQueues.trade > 0 and #runtime.Queue < 96 then
 					job = table.remove(scanQueues.trade, 1)
+				elseif #scanQueues.trade == 0 and tradeRosterPoll and now >= tradeRosterNextAt then
+					tradeRosterNextAt = now + 30
+					job = {capture = tradeRosterPoll}
 				elseif #scanQueues.trade == 0 and #runtime.Queue < 64 then
 					if #scanQueues.public > 0 then
 						job = table.remove(scanQueues.public, 1)
@@ -1335,15 +1406,7 @@ local function observeInventoryAccess()
 	assert(remote:IsA("RemoteEvent"), "BGS: inventory privacy event remote is unavailable.")
 	table.insert(connections, remote.OnClientEvent:Connect(function(event, player, private)
 		if not runtime.Running or event ~= "InventoryPrivacyChanged" then return end
-		if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players or type(private) ~= "boolean" then return end
-		if inventoryPrivate[player] == private then return end
-		inventoryPrivate[player] = private
-		privacyGeneration[player] = (privacyGeneration[player] or 0) + 1
-		if private then
-			cancelInventoryScan(player)
-		else
-			queueInventory(player, "inventory_public")
-		end
+		updateInventoryPrivacy(player, private, false)
 	end))
 	task.spawn(function()
 		while runtime.Running do task.wait(1) end
@@ -1369,7 +1432,8 @@ local function collectExists()
 		return left < right or left == right and a < b
 	end)
 	for i = 1, math.min(#keys, 50) do
-		while runtime.Running and (requestBusy or pendingScans() > 0 or os.clock() < nextTradeAt or #runtime.Queue >= 64) do
+		while runtime.Running and (requestBusy or pendingScans() > 0 or os.clock() < nextTradeAt
+			or tradeRosterPoll and os.clock() >= tradeRosterNextAt or #runtime.Queue >= 64) do
 			task.wait(0.1)
 		end
 		if not runtime.Running then break end
@@ -1421,9 +1485,11 @@ end
 local function observeTrades()
 	local watched, sequence = {}, 0
 	local configured = type(Settings.tradeAttribute) == "string" and Settings.tradeAttribute ~= "" and Settings.tradeAttribute or nil
-	local names = configured and {configured} or {"Trading", "IsTrading", "TradeStatus", "TradeState", "Trade"}
-	local candidates = {}
-	for _, name in ipairs(names) do candidates[name] = true end
+	local ownParticipants, ownTradeId
+	local failures, lastRosterNotice = 0, nil
+	local function isPlayer(player)
+		return typeof(player) == "Instance" and player:IsA("Player") and player.Parent == Players
+	end
 	local function queueTrade(player, state, event)
 		if #scanQueues.trade >= 256 or state.pending >= 32 then
 			warnError("Trade snapshot queue is full for " .. player.Name .. "; transition " .. event.sequence .. " could not be captured.")
@@ -1446,6 +1512,10 @@ local function observeTrades()
 					record.type = event.type
 					record.observedAt = event.observedAt
 					record.tradeAttribute = event.attribute
+					record.tradeStateSource = event.source
+					record.tradeId = event.tradeId
+					record.pollIntervalSeconds = event.source == "TradeGetPlayers" and 5 or nil
+					record.previousObservedAt = event.previousObservedAt
 					record.snapshotStartedAt = startedAt
 					record.snapshotCapturedAt = timestamp()
 					record.inventoryAvailable = ok and inventory ~= nil
@@ -1457,57 +1527,144 @@ local function observeTrades()
 			end,
 		})
 	end
+	local function transition(player, value, source, explicit, tradeId)
+		local state = watched[player]
+		if not state or not isPlayer(player) then return end
+		local observedAt, previousObservedAt = timestamp(), state.lastObservedAt
+		state.lastObservedAt = observedAt
+		if state.trading == nil and not explicit then
+			state.trading = value
+			return
+		end
+		if value == state.trading then return end
+		state.trading = value
+		state.generation = state.generation + 1
+		sequence = sequence + 1
+		queueTrade(player, state, {
+			type = value and "trade_started" or "trade_ended", attribute = source == "attribute" and configured or nil,
+			source = source, tradeId = tradeId, observedAt = observedAt, previousObservedAt = previousObservedAt,
+			generation = state.generation, sequence = sequence,
+		})
+	end
 	local function watch(player)
 		if watched[player] or player.Parent ~= Players then return end
-		local state = {trading = false, generation = 0, pending = 0}
+		local state = {generation = 0, pending = 0}
 		watched[player] = state
-		for _, name in ipairs(names) do
-			local value = player:GetAttribute(name)
-			local trading = tradingValue(value)
-			if value ~= nil and trading ~= nil then state.attribute, state.trading = name, trading break end
+		if configured then
+			local value = player:GetAttribute(configured)
+			if value ~= nil then state.trading = tradingValue(value) end
+			state.connection = player.AttributeChanged:Connect(function(name)
+				if not runtime.Running or name ~= configured or player.Parent ~= Players then return end
+				local current = player:GetAttribute(name)
+				local trading
+				if current ~= nil then trading = tradingValue(current) end
+				if trading == nil then
+					warnError("Configured trade attribute " .. name .. " is absent or unsupported on " .. player.Name .. ".")
+					return
+				end
+				if not ownParticipants or not table.find(ownParticipants, player) then
+					transition(player, trading, "attribute", false)
+				end
+			end)
 		end
-		state.connection = player.AttributeChanged:Connect(function(name)
-			if not runtime.Running or not candidates[name] or player.Parent ~= Players then return end
-			if state.attribute and name ~= state.attribute then return end
-			local value = tradingValue(player:GetAttribute(name))
-			if value == nil then
-				warnError("Unrecognized value for trade attribute " .. name .. " on " .. player.Name)
-				return
-			end
-			state.attribute = name
-			if value == state.trading then return end
-			state.trading = value
-			state.generation = state.generation + 1
-			sequence = sequence + 1
-			queueTrade(player, state, {
-				type = value and "trade_started" or "trade_ended", attribute = name,
-				observedAt = timestamp(), generation = state.generation, sequence = sequence,
-			})
-		end)
 	end
 	local added = Players.PlayerAdded:Connect(watch)
 	local removing = Players.PlayerRemoving:Connect(function(player)
 		local state = watched[player]
 		if state then
 			state.generation = state.generation + 1
-			state.connection:Disconnect()
+			if state.connection then state.connection:Disconnect() end
 			watched[player] = nil
 		end
 	end)
 	for _, player in ipairs(Players:GetPlayers()) do watch(player) end
-	task.spawn(function()
-		task.wait(10)
-		local found = false
-		for _, state in pairs(watched) do if state.attribute then found = true break end end
-		if runtime.Running and not found then
-			warnError("No recognizable player trade attribute found. Set Settings.tradeAttribute in BGS-main.txt to the exact replicated attribute name.")
+	local events = ReplicatedStorage:FindFirstChild("NetworkRemoteEvent")
+	local eventConnection
+	if events and events:IsA("RemoteEvent") then
+		eventConnection = events.OnClientEvent:Connect(function(event, data)
+			if not runtime.Running then return end
+			if event == "TradeOpened" and type(data) == "table" and isPlayer(data.Player0) and isPlayer(data.Player1)
+				and data.Player0 ~= data.Player1 and (data.Player0 == LocalPlayer or data.Player1 == LocalPlayer) then
+				ownParticipants = {data.Player0, data.Player1}
+				ownTradeId = data.Id
+				for _, player in ipairs(ownParticipants) do
+					watch(player)
+					transition(player, true, event, true, ownTradeId)
+				end
+			elseif (event == "TradeCompleted" or event == "TradeCancelled") and ownParticipants then
+				for _, player in ipairs(ownParticipants) do transition(player, false, event, true, ownTradeId) end
+				ownParticipants, ownTradeId = nil, nil
+				if not configured then tradeRosterNextAt = os.clock() + 5 end
+			end
+		end)
+	else
+		warnError("Trade event remote is absent. Own-trade start/end events cannot be observed.")
+	end
+	if not configured then
+		tradeRosterNextAt = os.clock()
+		tradeRosterPoll = function()
+			local assets = ReplicatedStorage:FindFirstChild("Assets")
+			local modules = assets and assets:FindFirstChild("Modules")
+			local tradeModule = modules and modules:FindFirstChild("IsTradeEnabled")
+			local gate = tradeModule and tradeModule:FindFirstChild("Enabled")
+			local cooldown = LocalPlayer:GetAttribute("TradeCooldown")
+			if not gate or not gate:IsA("BoolValue") or gate.Value ~= true
+				or type(cooldown) == "number" and cooldown > timestamp() then
+				tradeRosterNextAt = os.clock() + 15
+				if lastRosterNotice ~= "unavailable" then
+					log("Public trade-status polling is paused until trading is enabled and your trade cooldown ends. Own-trade events remain connected.")
+					lastRosterNotice = "unavailable"
+				end
+				return
+			end
+			local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+			if not remote or not remote:IsA("RemoteFunction") then
+				tradeRosterNextAt = os.clock() + 30
+				if lastRosterNotice ~= "remote_missing" then warnError("Public trade-status remote is unavailable.") end
+				lastRosterNotice = "remote_missing"
+				return
+			end
+			local generations, privacyBefore = {}, {}
+			for player, state in pairs(watched) do
+				generations[player], privacyBefore[player] = state.generation, privacyGeneration[player]
+			end
+			local ok, rows, reason = bounded(10, remote.InvokeServer, remote, "TradeGetPlayers")
+			if not ok or type(rows) ~= "table" then
+				failures = failures + 1
+				tradeRosterNextAt = os.clock() + math.min(60, 10 * failures)
+				local message = redact(reason or rows or "invalid public trade-status response")
+				if lastRosterNotice ~= message then warnError("Public trade-status query failed; retrying with backoff: " .. message) end
+				lastRosterNotice = message
+				return
+			end
+			failures, lastRosterNotice = 0, nil
+			tradeRosterNextAt = os.clock() + 5
+			for _, entry in ipairs(rows) do
+				if type(entry) == "table" and isPlayer(entry[1]) then
+					local player, status = entry[1], entry[2]
+					watch(player)
+					if privacyGeneration[player] == privacyBefore[player] then updateInventoryPrivacy(player, entry[4], true) end
+					local value
+					if status == "Trading" then value = true
+					elseif status == "Trade" or status == "Disabled" or status == "Cooldown" then value = false end
+					if value ~= nil and watched[player].generation == generations[player]
+						and (not ownParticipants or not table.find(ownParticipants, player)) then
+						transition(player, value, "TradeGetPlayers", false)
+					end
+				end
+			end
 		end
+	end
+	task.spawn(function()
 		while runtime.Running do task.wait(1) end
+		tradeRosterPoll, tradeRosterNextAt = nil, math.huge
 		added:Disconnect()
 		removing:Disconnect()
-		for _, state in pairs(watched) do state.connection:Disconnect() end
+		if eventConnection then eventConnection:Disconnect() end
+		for _, state in pairs(watched) do if state.connection then state.connection:Disconnect() end end
 	end)
-	log("Watching player trade-state transitions. Existing states are baselines, not new trade-start events.")
+	log(configured and ("Watching configured trade attribute " .. configured .. " and own-trade events.")
+		or "Watching own-trade events and polling public trade statuses every 5 seconds when permitted. First observations are baselines; trades between polls can be missed.")
 end
 local function snapshotStages()
 	if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboards", collectBoards) end
