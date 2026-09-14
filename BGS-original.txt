@@ -3,7 +3,6 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local VirtualUser = game:GetService("VirtualUser")
-local TeleportService = game:GetService("TeleportService")
 repeat task.wait() until Players.LocalPlayer
 local LocalPlayer = Players.LocalPlayer
 local BGS = (type(getgenv) == "function" and getgenv() or _G).BGS_CONFIG
@@ -14,51 +13,11 @@ local Settings = BGS.Settings
 local function enabled(value)
 	return value == true or tostring(value):upper() == "ON"
 end
-local targetMode = tostring(Settings.Game or Settings.teleportTo or "BGS"):upper()
-local targetPlaceId = targetMode == "BGSI" and BGS.BGSI_PLACE_ID or BGS.HOME_PLACE_ID
-if game.PlaceId ~= targetPlaceId then
-pcall(function()
-TeleportService:Teleport(targetPlaceId, LocalPlayer)
-end)
-return
-end
 local CompetitiveLeaderboardEnabled = enabled(Settings.competitiveLeaderboard)
 local LeaderboardsEnabled = enabled(Settings.leaderboards)
 local ExistsEnabled = enabled(Settings.exists)
 local TradeScanEnabled = enabled(Settings.tradeScan)
 local ScanningEnabled = enabled(Settings.scanning)
-local ServerRank = math.max(1, tonumber(Settings.serverRank) or 1)
-local function selectServerRank()
-local ok, body = pcall(function()
-return game:HttpGet(BGS.SERVER_API_BASE .. tostring(game.PlaceId))
-end)
-if not ok or type(body) ~= "string" then
-return
-end
-local decodedOk, decoded = pcall(function()
-return HttpService:JSONDecode(body)
-end)
-if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
-return
-end
-table.sort(decoded.data, function(a, b)
-return (tonumber(a.playing) or 0) > (tonumber(b.playing) or 0)
-end)
-local target = decoded.data[ServerRank]
-if target and target.id and target.id ~= game.JobId then
-pcall(function()
-TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
-end)
-end
-end
-task.spawn(function()
-task.wait(1)
-selectServerRank()
-while true do
-task.wait(900)
-selectServerRank()
-end
-end)
 local BOUNTY_DAYS = 14
 local IMAGE_FALLBACK = "N/A"
 local THUMBNAIL_SIZE = "420x420"
@@ -110,14 +69,21 @@ error(("Failed to require %s: %s"):format(module:GetFullName(), tostring(result)
 end
 return result
 end
-local Assets = ReplicatedStorage:WaitForChild("Assets")
-local Modules = Assets:WaitForChild("Modules")
-local ItemDataFolder = Modules:WaitForChild("ItemDataService")
-local PetScript = ItemDataFolder:WaitForChild("PetModule")
-local HatScript = ItemDataFolder:WaitForChild("HatModule")
-local EggScript = ItemDataFolder:WaitForChild("EggModule")
-local CrateScript = ItemDataFolder:WaitForChild("CrateModule")
-local ImageScript = Modules:WaitForChild("ImageService")
+local function requiredChild(parent, name)
+	local child = parent:WaitForChild(name, 15)
+	if not child then
+		error(("BGS: missing %s.%s in place %s. Join the compatible BGS game manually; no teleport was attempted."):format(parent:GetFullName(), name, tostring(game.PlaceId)), 2)
+	end
+	return child
+end
+local Assets = requiredChild(ReplicatedStorage, "Assets")
+local Modules = requiredChild(Assets, "Modules")
+local ItemDataFolder = requiredChild(Modules, "ItemDataService")
+local PetScript = requiredChild(ItemDataFolder, "PetModule")
+local HatScript = requiredChild(ItemDataFolder, "HatModule")
+local EggScript = requiredChild(ItemDataFolder, "EggModule")
+local CrateScript = requiredChild(ItemDataFolder, "CrateModule")
+local ImageScript = requiredChild(Modules, "ImageService")
 local EggServiceScript = Modules:FindFirstChild("EggService")
 local function readModuleSource(module)
 local success, source = pcall(function()
@@ -928,10 +894,6 @@ TradeScan = TradeScanEnabled,
 Scanning = ScanningEnabled,
 Leaderboards = LeaderboardsEnabled and collectLeaderboards() or {},
 CompetitiveLeaderboard = CompetitiveLeaderboardEnabled,
-ServerRank = ServerRank,
-TeleportTo = targetMode,
-HomePlaceId = BGS.HOME_PLACE_ID,
-BGSIPlaceId = BGS.BGSI_PLACE_ID,
 PlayerProfiles = ScanningEnabled and collectPlayerProfiles() or {},
 }
 local json = HttpService:JSONEncode(output)
