@@ -1,4 +1,4 @@
-local BGS_PAYLOAD_VERSION = "3"
+local BGS_PAYLOAD_VERSION = "4"
 local suppliedConfig = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -18,7 +18,7 @@ local LeaderboardsEnabled = enabled(Settings.leaderboards)
 local ExistsEnabled = enabled(Settings.exists)
 local TradeScanEnabled = enabled(Settings.tradeScan)
 local ScanningEnabled = enabled(Settings.scanning)
-local BOUNTY_DAYS = 14
+local BOUNTY_DAYS = 16
 local IMAGE_FALLBACK = "N/A"
 local THUMBNAIL_SIZE = "420x420"
 local THUMBNAIL_BATCH_SIZE = 100
@@ -172,13 +172,22 @@ local function uploadJsonAttachment(filename, contents)
 	end
 	return false, "Webhook retry limit reached"
 end
-local function enqueue(kind, data)
-	local contents = HttpService:JSONEncode(jsonSafe(data))
+local function enqueueContents(kind, contents, priority)
 	if #contents > 4 * 1024 * 1024 then
 		error("BGS: " .. kind .. " exceeds the 4 MiB export budget; export smaller batches.")
 	end
 	if #runtime.Queue >= 64 then error("BGS: upload queue is full; refusing to discard data silently.") end
-	table.insert(runtime.Queue, {Name = kind .. ".json", Contents = contents})
+	local item = {Name = kind .. ".json", Contents = contents, Priority = priority == true}
+	if priority then
+		local index = 1
+		while runtime.Queue[index] and runtime.Queue[index].Priority do index = index + 1 end
+		table.insert(runtime.Queue, index, item)
+	else
+		table.insert(runtime.Queue, item)
+	end
+end
+local function enqueue(kind, data, priority)
+	enqueueContents(kind, HttpService:JSONEncode(jsonSafe(data)), priority)
 end
 local function enqueueItems(kind, items)
 	if #items == 0 then enqueue(kind, {}) return end
@@ -930,29 +939,10 @@ local function predictBounty(timestamp, eggs)
 	end
 	return {Name = pet.Name, Chance = pet.Chance, Egg = eggs[index]}
 end
-local function forecastEggs(modules)
-	local worldEggs = workspace:FindFirstChild("Eggs")
-	if not worldEggs then
-		warnError("Workspace.Eggs is absent; bounty predictions use the " .. BountyModel.Date .. " home-place egg snapshot.")
-		return table.clone(BountyModel.Eggs), "snapshot"
-	end
-	local data = safeRequire(requiredChild(requiredChild(modules, "ItemDataService"), "EggModule"))
-	local image = safeRequire(requiredChild(modules, "ImageService"))
-	local eggs = {}
-	for _, instance in ipairs(worldEggs:GetChildren()) do
-		local name = instance.Name
-		if name:sub(-3) == "Egg" and data[name] then
-			local ok, value = pcall(image, name)
-			if ok and value and value ~= "" then table.insert(eggs, name) end
-		end
-	end
-	table.sort(eggs)
-	assert(#eggs > 1, "BGS: live egg selection is incomplete; refusing to generate a shifted schedule.")
-	return eggs, "Workspace.Eggs"
-end
 local function collectBounties()
-	local modules = requiredChild(requiredChild(ReplicatedStorage, "Assets"), "Modules")
-	local bountyScript = modules:FindFirstChild("SecretBountyService")
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local modules = assets and assets:FindFirstChild("Modules")
+	local bountyScript = modules and modules:FindFirstChild("SecretBountyService")
 	local service
 	if bountyScript then
 		local ok, value = bounded(10, require, bountyScript)
@@ -962,33 +952,42 @@ local function collectBounties()
 			warnError("SecretBountyService could not load; using the inspected prediction model.")
 		end
 	end
-	local schedule, eggs, eggSource = {}, nil, nil
-	local modelUsed = false
+	local schedule = {}
 	local today = math.floor(os.time() / 86400) * 86400
-	for offset = 0, BOUNTY_DAYS - 1 do
-		local timestamp, bounty = today + offset * 86400, nil
-		if service then
+	if service then
+		for offset = 1, BOUNTY_DAYS do
+			local timestamp = today + offset * 86400
 			local ok, value = bounded(5, service.Get, service, timestamp)
 			if ok and type(value) == "table" and type(value.Name) == "string" and type(value.Egg) == "string"
 				and type(value.Chance) == "number" and value.Chance > 0 and value.Chance < math.huge then
-				bounty = value
+				schedule[offset] = value
 			else
 				service = nil
-				warnError("SecretBountyService.Get failed; continuing with the inspected prediction model.")
+				warnError("SecretBountyService.Get failed; the entire forecast will use the complete inspected model.")
+				break
 			end
 		end
-		if not bounty then
-			if not eggs then eggs, eggSource = forecastEggs(modules) end
-			bounty = predictBounty(timestamp, eggs)
-			modelUsed = true
-		end
-		local row = table.clone(bounty)
-		row.Date = os.date("!%Y-%m-%d", timestamp)
-		table.insert(schedule, row)
 	end
-	enqueue("bounties", schedule)
-	if modelUsed then
-		enqueue("bounties_model", {SnapshotDate = BountyModel.Date, EggSource = eggSource, Eggs = eggs, Pets = BountyModel.Pets, FavoredEggs = BountyModel.FavoredEggs, FavoredEggWeight = BountyModel.FavoredEggWeight})
+	if not service then
+		for offset = 1, BOUNTY_DAYS do
+			schedule[offset] = predictBounty(today + offset * 86400, BountyModel.Eggs)
+		end
+	end
+	local entries = {}
+	for offset = 1, BOUNTY_DAYS do
+		local date = os.date("!%Y-%m-%d", today + offset * 86400)
+		local bounty = schedule[offset]
+		local fields = {
+			'"petName": ' .. HttpService:JSONEncode(bounty.Name),
+			'"odds": ' .. HttpService:JSONEncode("1 in " .. string.format("%.0f", math.ceil(100 / bounty.Chance))),
+			'"chancePercent": ' .. HttpService:JSONEncode(bounty.Chance),
+			'"egg": ' .. HttpService:JSONEncode(bounty.Egg),
+		}
+		table.insert(entries, "  " .. HttpService:JSONEncode(date) .. ": {\n    " .. table.concat(fields, ",\n    ") .. "\n  }")
+	end
+	enqueueContents("bounties", "{\n" .. table.concat(entries, ",\n") .. "\n}")
+	if not service then
+		enqueue("bounties_model", {SnapshotDate = BountyModel.Date, EggSource = "complete_inspected_snapshot", Eggs = BountyModel.Eggs, Pets = BountyModel.Pets, FavoredEggs = BountyModel.FavoredEggs, FavoredEggWeight = BountyModel.FavoredEggWeight})
 		warnError("Bounty predictions assume the inspected " .. BountyModel.Date .. " rules remain unchanged.")
 	end
 end
@@ -1062,6 +1061,88 @@ local function rememberExists(pets)
 		end
 	end
 end
+local EnchantNames = {b = "Bubbles", m = "Money", w = "Worlds", f = "Fusion", a = "Mega"}
+local function decodePets(pets)
+	local decoded = {}
+	for _, pet in ipairs(pets) do
+		assert(type(pet) == "table", "BGS: inventory contains an invalid pet record.")
+		local enchantType = pet[10]
+		if enchantType == nil or enchantType == false then
+			enchantType = "Normal"
+		else
+			enchantType = EnchantNames[enchantType] or enchantType
+		end
+		local record = {
+			id = pet[1], name = pet[2], nickname = pet[3],
+			level = pet[4], xp = pet[5], equipped = pet[6] == true,
+			locked = pet[7] == true, shiny = pet[8] == true,
+			enchantLevel = pet[9], enchantType = enchantType, knownDupe = pet[11] == true,
+		}
+		local extra = {}
+		for key, value in pairs(pet) do
+			if type(key) ~= "number" or key < 1 or key > 11 then extra[tostring(key)] = value end
+		end
+		if next(extra) then record.extraFields = extra end
+		table.insert(decoded, record)
+	end
+	return decoded
+end
+local function decodeHats(hats)
+	local decoded = {}
+	for _, hat in ipairs(hats or {}) do
+		assert(type(hat) == "table", "BGS: inventory contains an invalid hat record.")
+		local record = {id = hat[1], name = hat[2], equippedPetId = hat[3]}
+		local extra = {}
+		for key, value in pairs(hat) do
+			if type(key) ~= "number" or key < 1 or key > 3 then extra[tostring(key)] = value end
+		end
+		if next(extra) then record.extraFields = extra end
+		table.insert(decoded, record)
+	end
+	return decoded
+end
+local function inventoryRecord(player, inventory)
+	local record = {
+		username = player.Name, userid = player.UserId, displayname = player.DisplayName,
+		pets = decodePets(inventory.Pets), hats = decodeHats(inventory.Hats),
+	}
+	local tags = {}
+	for _, key in ipairs({"ChatTags", "Title", "EquippedTitle", "PlayerTag"}) do
+		local value = player:GetAttribute(key)
+		if value ~= nil then tags[key] = value end
+	end
+	if next(tags) then record.tags = tags end
+	return record
+end
+local function timestamp()
+	local ok, value = pcall(workspace.GetServerTimeNow, workspace)
+	return ok and type(value) == "number" and value or os.time()
+end
+local inventoryLocks, tradePending = {}, {}
+local inventoryInFlight = 0
+local function fetchInventory(player)
+	local deadline = os.clock() + 15
+	while runtime.Running and (inventoryLocks[player] or inventoryInFlight >= 3) and os.clock() < deadline do
+		task.wait(0.05)
+	end
+	if not runtime.Running or inventoryLocks[player] or inventoryInFlight >= 3 then
+		return false, "Inventory request capacity timed out."
+	end
+	if player.Parent ~= Players then return false, "Player left before inventory capture." end
+	local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+	if not remote or not remote:IsA("RemoteFunction") then return false, "Inventory remote is unavailable." end
+	inventoryLocks[player] = true
+	inventoryInFlight = inventoryInFlight + 1
+	local startedAt = timestamp()
+	local ok, inventory, reason = bounded(12, remote.InvokeServer, remote, "TradeViewInventory", player)
+	inventoryLocks[player] = nil
+	inventoryInFlight = inventoryInFlight - 1
+	if not ok then return false, redact(inventory), startedAt end
+	if type(inventory) ~= "table" or type(inventory.Pets) ~= "table" then
+		return true, nil, startedAt, redact(reason or "Server did not grant an inventory view.")
+	end
+	return true, inventory, startedAt
+end
 local function collectInventories()
 	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteFunction")
 	assert(remote:IsA("RemoteFunction"), "BGS: NetworkRemoteFunction is not a RemoteFunction.")
@@ -1069,26 +1150,14 @@ local function collectInventories()
 	table.sort(players, function(a, b) return a.UserId < b.UserId end)
 	for _, player in ipairs(players) do
 		if not runtime.Running then return end
-		if player.Parent == Players then
-			local ok, inventory, reason = bounded(12, remote.InvokeServer, remote, "TradeViewInventory", player)
+		if player.Parent == Players and not tradePending[player] then
+			local ok, inventory, _, reason = fetchInventory(player)
 			if not ok then
 				warnError(("Inventory request for %s failed: %s. Pausing this pass."):format(player.Name, tostring(inventory)))
 				return
 			end
 			if type(inventory) == "table" and type(inventory.Pets) == "table" then
-				local record = {
-					username = player.Name,
-					userid = player.UserId,
-					displayname = player.DisplayName,
-					pets = inventory.Pets,
-					hats = inventory.Hats,
-				}
-				local tags = {}
-				for _, key in ipairs({"ChatTags", "Title", "EquippedTitle", "PlayerTag"}) do
-					local value = player:GetAttribute(key)
-					if value ~= nil then tags[key] = value end
-				end
-				if next(tags) then record.tags = tags end
+				local record = inventoryRecord(player, inventory)
 				enqueue("inventory_" .. tostring(player.UserId), record)
 				rememberExists(inventory.Pets)
 			else
@@ -1131,34 +1200,113 @@ local function collectExists()
 	end
 	if #rows > 0 then enqueue("pet_exists", rows) end
 end
-local function observeOwnTrades()
-	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteEvent")
-	assert(remote:IsA("RemoteEvent"), "BGS: trade event stream is unavailable.")
-	local allowed = {TradeOpened = true, TradeStatusChanged = true, TradeItemAdded = true, TradeItemRemoved = true, TradeKnownDupesChanged = true, TradeProcessing = true, TradeCompleted = true, TradeCancelled = true}
-	local records, sequence = {}, 0
-	local connection = remote.OnClientEvent:Connect(function(event, ...)
-		if not runtime.Running or not allowed[event] then return end
-		local ok, err = pcall(function(...)
-			sequence = sequence + 1
-			table.insert(records, {event = event, time = os.time(), sequence = sequence, arguments = jsonSafe(table.pack(...))})
-			if #records >= 100 then
-				enqueue("trade_events_" .. sequence, records)
-				records = {}
+local function tradingValue(value)
+	if value == nil then return false end
+	if type(value) == "boolean" then return value end
+	if type(value) == "string" then
+		local normalized = value:lower():gsub("[%s_%-]", "")
+		if normalized == "trading" or normalized == "true" then return true end
+		if normalized == "idle" or normalized == "nottrading" or normalized == "false" or normalized == "none" then return false end
+	end
+	return nil
+end
+local function observeTrades()
+	local watched, sequence = {}, 0
+	local configured = type(Settings.tradeAttribute) == "string" and Settings.tradeAttribute ~= "" and Settings.tradeAttribute or nil
+	local names = configured and {configured} or {"Trading", "IsTrading", "TradeStatus", "TradeState", "Trade"}
+	local candidates = {}
+	for _, name in ipairs(names) do candidates[name] = true end
+	local function startWorker(player, state)
+		if state.working then return end
+		state.working = true
+		task.spawn(function()
+			while runtime.Running and #state.queue > 0 do
+				local event = table.remove(state.queue, 1)
+				local captured, err = pcall(function()
+					local ok, inventory, startedAt, reason = fetchInventory(player)
+					local record
+					if ok and inventory then
+						record = inventoryRecord(player, inventory)
+						rememberExists(inventory.Pets)
+					else
+						record = {username = player.Name, userid = player.UserId, displayname = player.DisplayName}
+						record.inventoryError = redact(reason or inventory or "Inventory unavailable.")
+					end
+					record.type = event.type
+					record.observedAt = event.observedAt
+					record.tradeAttribute = event.attribute
+					record.snapshotStartedAt = startedAt
+					record.snapshotCapturedAt = timestamp()
+					record.inventoryAvailable = ok and inventory ~= nil
+					record.tradeStateChangedDuringCapture = state.generation ~= event.generation or player.Parent ~= Players
+					enqueue(event.type .. "_" .. player.UserId .. "_" .. event.sequence, record, true)
+				end)
+				if not captured then warnError("Trade snapshot failed for " .. player.Name .. ": " .. tostring(err)) end
+				tradePending[player] = math.max(0, (tradePending[player] or 1) - 1)
+				if tradePending[player] == 0 then tradePending[player] = nil end
+				task.wait(0.25)
 			end
-		end, ...)
-		if not ok then warnError(err) end
-	end)
-	task.spawn(function()
-		while runtime.Running do
-			task.wait(10)
-			if runtime.Running and #records > 0 then
-				local ok, err = pcall(enqueue, "trade_events_" .. sequence, records)
-				if ok then records = {} else warnError(err) end
-			end
+			state.working = false
+			if not runtime.Running then tradePending[player] = nil end
+		end)
+	end
+	local function watch(player)
+		if watched[player] or player.Parent ~= Players then return end
+		local state = {trading = false, generation = 0, queue = {}}
+		watched[player] = state
+		for _, name in ipairs(names) do
+			local value = player:GetAttribute(name)
+			local trading = tradingValue(value)
+			if value ~= nil and trading ~= nil then state.attribute, state.trading = name, trading break end
 		end
-		connection:Disconnect()
+		state.connection = player.AttributeChanged:Connect(function(name)
+			if not runtime.Running or not candidates[name] or player.Parent ~= Players then return end
+			if state.attribute and name ~= state.attribute then return end
+			local value = tradingValue(player:GetAttribute(name))
+			if value == nil then
+				warnError("Unrecognized value for trade attribute " .. name .. " on " .. player.Name)
+				return
+			end
+			state.attribute = name
+			if value == state.trading then return end
+			state.trading = value
+			state.generation = state.generation + 1
+			sequence = sequence + 1
+			if #state.queue >= 32 then
+				warnError("Trade snapshot queue is full for " .. player.Name .. "; transition " .. sequence .. " could not be captured.")
+				return
+			end
+			table.insert(state.queue, {
+				type = value and "trade_started" or "trade_ended", attribute = name,
+				observedAt = timestamp(), generation = state.generation, sequence = sequence,
+			})
+			tradePending[player] = (tradePending[player] or 0) + 1
+			startWorker(player, state)
+		end)
+	end
+	local added = Players.PlayerAdded:Connect(watch)
+	local removing = Players.PlayerRemoving:Connect(function(player)
+		local state = watched[player]
+		if state then
+			state.generation = state.generation + 1
+			state.connection:Disconnect()
+			watched[player] = nil
+		end
 	end)
-	log("Listening only to trade events delivered to this client; no server-wide trade history is requested.")
+	for _, player in ipairs(Players:GetPlayers()) do watch(player) end
+	task.spawn(function()
+		task.wait(10)
+		local found = false
+		for _, state in pairs(watched) do if state.attribute then found = true break end end
+		if runtime.Running and not found then
+			warnError("No recognizable player trade attribute found. Set Settings.tradeAttribute in BGS-main.txt to the exact replicated attribute name.")
+		end
+		while runtime.Running do task.wait(1) end
+		added:Disconnect()
+		removing:Disconnect()
+		for _, state in pairs(watched) do state.connection:Disconnect() end
+	end)
+	log("Watching player trade-state transitions. Existing states are baselines, not new trade-start events.")
 end
 local function snapshotStages()
 	if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboards", collectBoards) end
@@ -1169,8 +1317,8 @@ local function snapshotStages()
 		end, 600)
 	end
 end
+if TradeScanEnabled then stage("trade_observer", observeTrades, 30) end
 snapshotStages()
-if TradeScanEnabled then stage("trade_observer", observeOwnTrades, 30) end
 if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
 if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
 task.spawn(function()
