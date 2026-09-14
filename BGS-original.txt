@@ -1,4 +1,4 @@
-local BGS_PAYLOAD_VERSION = "2"
+local BGS_PAYLOAD_VERSION = "3"
 local suppliedConfig = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -173,7 +173,7 @@ local function uploadJsonAttachment(filename, contents)
 	return false, "Webhook retry limit reached"
 end
 local function enqueue(kind, data)
-	local contents = HttpService:JSONEncode(envelope(kind, data))
+	local contents = HttpService:JSONEncode(jsonSafe(data))
 	if #contents > 4 * 1024 * 1024 then
 		error("BGS: " .. kind .. " exceeds the 4 MiB export budget; export smaller batches.")
 	end
@@ -181,7 +181,7 @@ local function enqueue(kind, data)
 	table.insert(runtime.Queue, {Name = kind .. ".json", Contents = contents})
 end
 local function enqueueItems(kind, items)
-	if #items == 0 then enqueue(kind, {Items = {}, Count = 0}) return end
+	if #items == 0 then enqueue(kind, {}) return end
 	local pages, page, bytes = {}, {}, 0
 	for _,item in ipairs(items) do
 		local itemBytes = #HttpService:JSONEncode(jsonSafe(item))
@@ -194,10 +194,11 @@ local function enqueueItems(kind, items)
 	end
 	table.insert(pages, page)
 	for index, itemsPage in ipairs(pages) do
-		enqueue(#pages == 1 and kind or kind .. "_" .. index, {Items = itemsPage, Part = index, Parts = #pages, Count = #items})
+		enqueue(#pages == 1 and kind or kind .. "_" .. index, itemsPage)
 	end
 end
 local function stage(name, callback, timeout)
+	if runtime.Stages[name] and runtime.Stages[name].State == "running" then return end
 	task.spawn(function()
 		runtime.Stages[name] = {State = "running"}
 		log("Starting " .. name)
@@ -867,171 +868,322 @@ enqueue("catalog_notes", {
 	Images = enabled(Settings.resolveImages) and "Resolved where available; otherwise original asset references." or "Original asset references; no thumbnail requests.",
 })
 end
+local BountyModel = {
+	Date = "2026-09-14",
+	Pets = {
+		{Name = "Jack O' Ferno", Chance = 0.000025},
+		{Name = "Autumn Pyramidium", Chance = 0.00001},
+		{Name = "All Seeing Shard", Chance = 0.000005},
+	},
+	FavoredEggWeight = 3,
+	FavoredEggs = {
+		["Candle Egg"] = true, ["Harvest Egg"] = true, ["Jelly Egg"] = true,
+		["Water Egg"] = true, ["Ancient Egg"] = true, ["Fancy Egg"] = true, ["Sparkly Egg"] = true,
+	},
+	Eggs = {
+		"Ancient Egg", "Balloon Egg", "Beach Egg", "Bee Egg", "Block Egg", "Candle Egg",
+		"Coconut Egg", "Colorful Egg", "Common Egg", "Coral Egg", "Crab Egg", "Crystal Egg",
+		"Dark Egg", "Darkness Egg", "Demonic Egg", "Dominus Egg", "Evil Egg", "Fancy Egg",
+		"Fire Egg", "Gummy Egg", "Halo Egg", "Harvest Egg", "Heaven Egg", "Hell Egg",
+		"Ice Cream Egg", "Ice Shard Egg", "Jelly Egg", "Kelp Egg", "Lunar Egg", "Magma Egg",
+		"Mossy Egg", "Mushroom Egg", "Mythical Egg", "Nightmare Egg", "Obsidian Egg",
+		"Ocean Egg", "Orange Egg", "Pastel Egg", "Rainbow Egg", "Red Egg", "Rubber Egg",
+		"Sand Egg", "Slushy Egg", "Sparkly Egg", "Spikey Egg", "Spirit Egg", "Spotted Egg",
+		"Stone Egg", "Toy Egg", "Void Shard Egg", "Water Egg", "Wind-up Egg",
+	},
+}
+local function bountyPermutation(seed, count, salt)
+	local order = {}
+	for i = 1, count do order[i] = i end
+	local random = Random.new(seed * 131 + salt)
+	for i = count, 2, -1 do
+		local j = random:NextInteger(1, i)
+		order[i], order[j] = order[j], order[i]
+	end
+	return order
+end
+local function bountyRotation(seed, count, salt)
+	local cycle = math.floor(seed / count)
+	local order = bountyPermutation(cycle, count, salt)
+	if count > 2 then
+		local previous = bountyPermutation(cycle - 1, count, salt)
+		if order[1] == previous[count] then order[1], order[2] = order[2], order[1] end
+	end
+	return order[seed % count + 1]
+end
+local function predictBounty(timestamp, eggs)
+	local seed = math.floor(timestamp / 86400) - 1
+	local pet = BountyModel.Pets[bountyRotation(seed, #BountyModel.Pets, 17)]
+	local total = 0
+	for _, name in ipairs(eggs) do
+		total = total + (BountyModel.FavoredEggs[name] and BountyModel.FavoredEggWeight or 1)
+	end
+	local index = #eggs
+	if total == #eggs then
+		index = bountyRotation(seed, #eggs, 53)
+	else
+		local roll = Random.new(seed * 131 + 53):NextNumber(0, total)
+		for i, name in ipairs(eggs) do
+			roll = roll - (BountyModel.FavoredEggs[name] and BountyModel.FavoredEggWeight or 1)
+			if roll < 0 then index = i break end
+		end
+	end
+	return {Name = pet.Name, Chance = pet.Chance, Egg = eggs[index]}
+end
+local function forecastEggs(modules)
+	local worldEggs = workspace:FindFirstChild("Eggs")
+	if not worldEggs then
+		warnError("Workspace.Eggs is absent; bounty predictions use the " .. BountyModel.Date .. " home-place egg snapshot.")
+		return table.clone(BountyModel.Eggs), "snapshot"
+	end
+	local data = safeRequire(requiredChild(requiredChild(modules, "ItemDataService"), "EggModule"))
+	local image = safeRequire(requiredChild(modules, "ImageService"))
+	local eggs = {}
+	for _, instance in ipairs(worldEggs:GetChildren()) do
+		local name = instance.Name
+		if name:sub(-3) == "Egg" and data[name] then
+			local ok, value = pcall(image, name)
+			if ok and value and value ~= "" then table.insert(eggs, name) end
+		end
+	end
+	table.sort(eggs)
+	assert(#eggs > 1, "BGS: live egg selection is incomplete; refusing to generate a shifted schedule.")
+	return eggs, "Workspace.Eggs"
+end
 local function collectBounties()
 	local modules = requiredChild(requiredChild(ReplicatedStorage, "Assets"), "Modules")
-	local service = safeRequire(requiredChild(modules, "SecretBountyService"))
-	assert(type(service) == "table" and type(service.Get) == "function", "SecretBountyService.Get is unavailable.")
-	local schedule, failures, now = {}, {}, os.time()
-	for offset = 0, BOUNTY_DAYS - 1 do
-		local timestamp = now + offset * 86400
-		local ok, bounty = bounded(5, service.Get, service, timestamp)
-		if ok and type(bounty) == "table" and type(bounty.Name) == "string" and type(bounty.Egg) == "string"
-			and type(bounty.Chance) == "number" and bounty.Chance > 0 and bounty.Chance < math.huge then
-			table.insert(schedule, {
-				Date = os.date("!%Y-%m-%d", timestamp),
-				Pet = bounty.Name, Egg = bounty.Egg,
-				Chance = bounty.Chance, Odds = math.ceil(100 / bounty.Chance),
-			})
+	local bountyScript = modules:FindFirstChild("SecretBountyService")
+	local service
+	if bountyScript then
+		local ok, value = bounded(10, require, bountyScript)
+		if ok and type(value) == "table" and type(value.Get) == "function" then
+			service = value
 		else
-			table.insert(failures, {Date = os.date("!%Y-%m-%d", timestamp), Error = ok and "Invalid bounty result" or redact(bounty)})
+			warnError("SecretBountyService could not load; using the inspected prediction model.")
 		end
 	end
-	enqueue("bounties", {Source = "SecretBountyService.Get", Schedule = schedule, Errors = failures, Complete = #schedule == BOUNTY_DAYS})
-end
-local function visible(node)
-	while node do
-		if node:IsA("GuiObject") and not node.Visible then return false end
-		if node:IsA("LayerCollector") and not node.Enabled then return false end
-		node = node.Parent
-	end
-	return true
-end
-local function textSnapshot(root, onlyVisible)
-	local rows = {}
-	if root then
-		for _, node in ipairs(root:GetDescendants()) do
-			if (node:IsA("TextLabel") or node:IsA("TextButton")) and node.Text ~= "" and (not onlyVisible or visible(node)) then
-				table.insert(rows, {Path = node:GetFullName(), Name = node.Name, Text = node.Text})
+	local schedule, eggs, eggSource = {}, nil, nil
+	local modelUsed = false
+	local today = math.floor(os.time() / 86400) * 86400
+	for offset = 0, BOUNTY_DAYS - 1 do
+		local timestamp, bounty = today + offset * 86400, nil
+		if service then
+			local ok, value = bounded(5, service.Get, service, timestamp)
+			if ok and type(value) == "table" and type(value.Name) == "string" and type(value.Egg) == "string"
+				and type(value.Chance) == "number" and value.Chance > 0 and value.Chance < math.huge then
+				bounty = value
+			else
+				service = nil
+				warnError("SecretBountyService.Get failed; continuing with the inspected prediction model.")
 			end
 		end
+		if not bounty then
+			if not eggs then eggs, eggSource = forecastEggs(modules) end
+			bounty = predictBounty(timestamp, eggs)
+			modelUsed = true
+		end
+		local row = table.clone(bounty)
+		row.Date = os.date("!%Y-%m-%d", timestamp)
+		table.insert(schedule, row)
 	end
-	table.sort(rows, function(a, b) return a.Path < b.Path end)
-	return rows
+	enqueue("bounties", schedule)
+	if modelUsed then
+		enqueue("bounties_model", {SnapshotDate = BountyModel.Date, EggSource = eggSource, Eggs = eggs, Pets = BountyModel.Pets, FavoredEggs = BountyModel.FavoredEggs, FavoredEggWeight = BountyModel.FavoredEggWeight})
+		warnError("Bounty predictions assume the inspected " .. BountyModel.Date .. " rules remain unchanged.")
+	end
 end
-local function boardRows(root)
-	local rows = {}
-	if not root then return rows end
-	for _, frame in ipairs(root:GetDescendants()) do
-		local name = frame:FindFirstChild("NameBacking")
-		local amount = frame:FindFirstChild("AmountBacking")
-		local rank = frame:FindFirstChild("RankBacking")
-		name = name and name:FindFirstChild("PlayerName")
-		amount = amount and amount:FindFirstChild("Amount")
-		rank = rank and rank:FindFirstChild("Rank")
-		if name and amount and rank and name:IsA("TextLabel") and amount:IsA("TextLabel") and rank:IsA("TextLabel") then
-			local value = amount.Text:gsub(",", "")
-			table.insert(rows, {
-				Path = frame:GetFullName(),
-				PlayerName = name.Text,
-				Rank = tonumber(rank.Text:match("%d+")),
-				RankText = rank.Text,
-				Score = value:match("^%d+$") and value or nil,
-				ScoreText = amount.Text,
-			})
+local BoardNames = {BubbleBoard = "bubbles", HatchBoard = "hatches", BubblerBoard = "competitive_bubbles", EggBoard = "competitive_hatches"}
+local function boardIdentity(node)
+	local period, adornee
+	for _ = 1, 24 do
+		if not node then break end
+		if node.Name == "AllTime" or node.Name == "Weekly" or node.Name == "Daily" then period = node.Name end
+		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current" end
+		if node:IsA("SurfaceGui") then adornee = node.Adornee end
+		node = node.Parent
+	end
+	node = adornee
+	for _ = 1, 12 do
+		if not node then break end
+		if BoardNames[node.Name] then return BoardNames[node.Name], period or "current" end
+		node = node.Parent
+	end
+end
+local function textValue(root, name)
+	local node = root:FindFirstChild(name, true)
+	if node and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) then return node.Text end
+end
+local function collectBoards()
+	local roots, boards = {workspace}, {}
+	local gui = LocalPlayer:FindFirstChild("PlayerGui")
+	if gui then table.insert(roots, gui) end
+	for _, root in ipairs(roots) do
+		for index, frame in ipairs(root:GetDescendants()) do
+			if frame:IsA("GuiObject") and frame:FindFirstChild("NameBacking") then
+				local board, period = boardIdentity(frame)
+				local name, amount, rank = textValue(frame, "PlayerName"), textValue(frame, "Amount"), textValue(frame, "Rank")
+				if board and name and amount and rank then
+					local key = board .. "_" .. period:lower()
+					boards[key] = boards[key] or {}
+					local score = amount:gsub(",", "")
+					local row = {username = name, rank = tonumber(rank:match("%d+")), score = score}
+					local id = frame:GetAttribute("UserId")
+					if type(id) == "number" then row.userid = id end
+					table.insert(boards[key], row)
+				end
+			end
+			if index % 1000 == 0 then task.wait(0.03) end
 		end
 	end
-	table.sort(rows, function(a, b)
-		if a.Rank ~= b.Rank then return (a.Rank or math.huge) < (b.Rank or math.huge) end
-		return a.Path < b.Path
+	local exported = 0
+	for name, rows in pairs(boards) do
+		local competitive = name:sub(1, 12) == "competitive_"
+		if competitive and CompetitiveLeaderboardEnabled or not competitive and LeaderboardsEnabled then
+			table.sort(rows, function(a, b)
+				if a.rank ~= b.rank then return (a.rank or math.huge) < (b.rank or math.huge) end
+				return a.username < b.username
+			end)
+			enqueue(name, rows)
+			exported = exported + 1
+		end
+	end
+	if exported == 0 then
+		warnError("No public boards are loaded in this place. Checked Workspace and PlayerGui, including reparented SurfaceGuis. No empty leaderboard file was sent.")
+	end
+end
+local existsPending, existsDone = {}, {}
+local function rememberExists(pets)
+	if not ExistsEnabled then return end
+	for _, pet in pairs(pets) do
+		if type(pet) == "table" and type(pet[2]) == "string" then
+			local shiny = pet[8] == true
+			local key = pet[2] .. ":" .. tostring(shiny)
+			if not existsDone[key] then existsPending[key] = {name = pet[2], shiny = shiny} end
+		end
+	end
+end
+local function collectInventories()
+	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteFunction")
+	assert(remote:IsA("RemoteFunction"), "BGS: NetworkRemoteFunction is not a RemoteFunction.")
+	local players = Players:GetPlayers()
+	table.sort(players, function(a, b) return a.UserId < b.UserId end)
+	for _, player in ipairs(players) do
+		if not runtime.Running then return end
+		if player.Parent == Players then
+			local ok, inventory, reason = bounded(12, remote.InvokeServer, remote, "TradeViewInventory", player)
+			if not ok then
+				warnError(("Inventory request for %s failed: %s. Pausing this pass."):format(player.Name, tostring(inventory)))
+				return
+			end
+			if type(inventory) == "table" and type(inventory.Pets) == "table" then
+				local record = {
+					username = player.Name,
+					userid = player.UserId,
+					displayname = player.DisplayName,
+					pets = inventory.Pets,
+					hats = inventory.Hats,
+				}
+				local tags = {}
+				for _, key in ipairs({"ChatTags", "Title", "EquippedTitle", "PlayerTag"}) do
+					local value = player:GetAttribute(key)
+					if value ~= nil then tags[key] = value end
+				end
+				if next(tags) then record.tags = tags end
+				enqueue("inventory_" .. tostring(player.UserId), record)
+				rememberExists(inventory.Pets)
+			else
+				warnError(("Inventory unavailable for %s: %s. No data was exported for this player."):format(player.Name, tostring(reason or "server did not grant an inventory view")))
+			end
+			task.wait(3.5)
+		end
+	end
+end
+local function collectExists()
+	if not next(existsPending) then return end
+	local modules = requiredChild(requiredChild(ReplicatedStorage, "Assets"), "Modules")
+	local gate = safeRequire(requiredChild(modules, "IsExistsUiEnabled"))
+	if type(gate) ~= "function" or gate() ~= true then
+		warnError("The game has not enabled exists viewing; no count requests were made.")
+		return
+	end
+	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteFunction")
+	assert(remote:IsA("RemoteFunction"), "BGS: missing inventory/exists remote.")
+	local keys, rows = {}, {}
+	for key in pairs(existsPending) do table.insert(keys, key) end
+	table.sort(keys)
+	for i = 1, math.min(#keys, 50) do
+		local key = keys[i]
+		local pet = existsPending[key]
+		local ok, counts = bounded(10, remote.InvokeServer, remote, "GetPetExistsCount", pet.name, pet.shiny)
+		if not ok then
+			warnError("Exists request failed; remaining queries are postponed.")
+			break
+		end
+		if type(counts) == "table" and type(counts.count) == "string" and counts.count:match("^%d+$") then
+			local row = table.clone(counts)
+			row.name, row.shiny = pet.name, pet.shiny
+			table.insert(rows, row)
+			existsPending[key], existsDone[key] = nil, true
+		else
+			warnError("Exists count unavailable for " .. pet.name .. "; no value was invented.")
+		end
+		task.wait(1.5)
+	end
+	if #rows > 0 then enqueue("pet_exists", rows) end
+end
+local function observeOwnTrades()
+	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteEvent")
+	assert(remote:IsA("RemoteEvent"), "BGS: trade event stream is unavailable.")
+	local allowed = {TradeOpened = true, TradeStatusChanged = true, TradeItemAdded = true, TradeItemRemoved = true, TradeKnownDupesChanged = true, TradeProcessing = true, TradeCompleted = true, TradeCancelled = true}
+	local records, sequence = {}, 0
+	local connection = remote.OnClientEvent:Connect(function(event, ...)
+		if not runtime.Running or not allowed[event] then return end
+		local ok, err = pcall(function(...)
+			sequence = sequence + 1
+			table.insert(records, {event = event, time = os.time(), sequence = sequence, arguments = jsonSafe(table.pack(...))})
+			if #records >= 100 then
+				enqueue("trade_events_" .. sequence, records)
+				records = {}
+			end
+		end, ...)
+		if not ok then warnError(err) end
 	end)
-	return rows
-end
-local function collectLeaderboards()
-	local boards = {}
-	for _, name in ipairs({"BubbleBoard", "HatchBoard", "RankBoard"}) do
-		local root = workspace:FindFirstChild(name)
-		local rows = boardRows(root)
-		table.insert(boards, {Name = name, Rows = rows, Available = #rows > 0, Reason = #rows == 0 and "No replicated board rows available." or nil})
-	end
-	enqueue("leaderboards", {Scope = "Currently replicated public board rows, not hidden or unloaded periods.", Boards = boards})
-end
-local function collectCompetitiveLeaderboards()
-	local root = workspace:FindFirstChild("Competitive")
-	local boards = root and root:FindFirstChild("Boards")
-	local result = {}
-	for _, name in ipairs({"BubblerBoard", "EggBoard"}) do
-		local board = boards and boards:FindFirstChild(name)
-		local rows = boardRows(board)
-		table.insert(result, {Name = name, Rows = rows, Available = #rows > 0, Reason = #rows == 0 and "No replicated competitive rows available." or nil})
-	end
-	enqueue("competitive_leaderboards", {Scope = "Currently replicated public board rows.", Boards = result})
-end
-local function playerScreen()
-	local gui = LocalPlayer:FindFirstChild("PlayerGui")
-	return gui and gui:FindFirstChild("ScreenGui")
-end
-local function collectVisibleInventory()
-	local screen = playerScreen()
-	local frame = screen and screen:FindFirstChild("PetsFrame")
-	local rows = textSnapshot(frame, true)
-	enqueue("inventory", {
-		Scope = "Text displayed by the game's inventory UI on this client; not a full inventory or other players' private data.",
-		Available = #rows > 0, Rows = rows,
-		Reason = #rows == 0 and "No visible inventory panel. No inventory-view permission was inferred or bypassed." or nil,
-	})
-end
-local function collectVisibleExists()
-	local screen = playerScreen()
-	local viewer = screen and screen:FindFirstChild("GUIDViewer")
-	local exists = viewer and viewer:FindFirstChild("Exists")
-	local available = exists and visible(exists) or false
-	local rows = available and textSnapshot(viewer, true) or {}
-	enqueue("pet_exists", {
-		Scope = "Exists information currently displayed by the game's item viewer.",
-		Available = #rows > 0, Rows = rows,
-		Reason = #rows == 0 and "The item viewer is not displaying exists counts. No global counts were queried." or nil,
-	})
-end
-local function collectVisibleTrade()
-	local screen = playerScreen()
-	local frame = screen and screen:FindFirstChild("TradeFrame")
-	local rows = textSnapshot(frame, true)
-	enqueue("trades", {
-		Scope = "Trade UI currently displayed to this client; not server-wide or historical trades.",
-		Available = #rows > 0, Rows = rows,
-		Reason = #rows == 0 and "No visible trade. Private trade history is not available to this exporter." or nil,
-	})
-end
-local function collectPlayerProfiles()
-local result = {}
-for _, player in ipairs(Players:GetPlayers()) do
-local stats = {}
-local leaderstats = player:FindFirstChild("leaderstats")
-if leaderstats then
-for _, stat in ipairs(leaderstats:GetChildren()) do
-if stat:IsA("ValueBase") then
-stats[stat.Name] = stat.Value
-end
-end
-end
-result[tostring(player.UserId)] = {
-Username = player.Name,
-DisplayName = player.DisplayName,
-UserId = player.UserId,
-Leaderstats = stats,
-}
-end
-return result
+	task.spawn(function()
+		while runtime.Running do
+			task.wait(10)
+			if runtime.Running and #records > 0 then
+				local ok, err = pcall(enqueue, "trade_events_" .. sequence, records)
+				if ok then records = {} else warnError(err) end
+			end
+		end
+		connection:Disconnect()
+	end)
+	log("Listening only to trade events delivered to this client; no server-wide trade history is requested.")
 end
 local function snapshotStages()
-	if LeaderboardsEnabled then stage("leaderboards", collectLeaderboards) end
-	if CompetitiveLeaderboardEnabled then stage("competitive_leaderboards", collectCompetitiveLeaderboards) end
-	if ExistsEnabled then stage("pet_exists", collectVisibleExists) end
-	if TradeScanEnabled then stage("trades", collectVisibleTrade) end
+	if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboards", collectBoards) end
 	if ScanningEnabled then
-		stage("inventory", collectVisibleInventory)
-		stage("player_profiles", function() enqueue("player_profiles", collectPlayerProfiles()) end)
+		stage("inventories", function()
+			collectInventories()
+			if ExistsEnabled then stage("pet_exists", collectExists, 180) end
+		end, 600)
 	end
 end
 snapshotStages()
+if TradeScanEnabled then stage("trade_observer", observeOwnTrades, 30) end
 if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
 if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
 task.spawn(function()
-	task.wait(60)
+	local day = math.floor(os.time() / 86400)
+	task.wait(300)
 	while runtime.Running do
-		enqueue("export_report", {Stages = runtime.Stages, FilesUploaded = runtime.Sent, PendingFiles = #runtime.Queue})
 		snapshotStages()
-		task.wait(60)
+		local nextDay = math.floor(os.time() / 86400)
+		if nextDay ~= day then
+			day = nextDay
+			if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
+		end
+		task.wait(300)
 	end
 end)
 return runtime
