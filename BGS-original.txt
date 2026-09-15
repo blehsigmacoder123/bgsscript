@@ -1,5 +1,5 @@
 local BGS_PAYLOAD_VERSION = "4"
-local BGS_PAYLOAD_REVISION = "inventory-queue-server-routing-1"
+local BGS_PAYLOAD_REVISION = "routing-phases-1"
 local suppliedConfig = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -18,6 +18,8 @@ end
 local ExistsEnabled = enabled(Settings.exists)
 local TradeScanEnabled = enabled(Settings.tradeScan)
 local ScanningEnabled = enabled(Settings.scanning)
+local CompetitiveLeaderboardEnabled = enabled(Settings.competitiveLeaderboard)
+local LeaderboardsEnabled = enabled(Settings.leaderboards)
 local SERVER_RANK = math.max(1, math.floor(tonumber(Settings.serverRank) or 1))
 local BOUNTY_DAYS = 16
 local IMAGE_FALLBACK = "N/A"
@@ -89,12 +91,17 @@ end
 local function responseBody(response)
 	return response and (response.Body or response.body or response.ResponseBody)
 end
-local TRADE_HANGOUT_PLACE_ID = 2512643572
+local BGS_PLACE_ID = 2512643572
+local BGS_API = "http://51.77.216.96:4564/2512643572"
+local TRADE_HANGOUT_PLACE_ID = 104280841513368
 local TRADE_HANGOUT_API = "http://51.77.216.96:4564/104280841513368"
 local FALLBACK_PLACE_ID = 127738893422250
 local FALLBACK_API = "http://51.77.216.96:4564/127738893422250"
 local SERVER_CHECK_INTERVAL = 60
+local BGS_ROTATION_INTERVAL = 240
 local serverHopInProgress = false
+local tradeHangoutReady = false
+local routingActive = false
 local function fetchRankedServers(url)
 	local response = request({
 		Url = url,
@@ -149,7 +156,8 @@ local function teleportToServer(placeId, server)
 	return true
 end
 local function routeTradeHangout()
-	if game.PlaceId ~= TRADE_HANGOUT_PLACE_ID and game.PlaceId ~= FALLBACK_PLACE_ID then return end
+	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID and game.PlaceId ~= FALLBACK_PLACE_ID then return end
+	routingActive = true
 	local function checkTarget()
 		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
 		if not servers then
@@ -157,26 +165,43 @@ local function routeTradeHangout()
 			return false
 		end
 		local target = rankedOpenServer(servers)
-		if target and target.id == game.JobId then return true end
+		if target and game.PlaceId == TRADE_HANGOUT_PLACE_ID and target.id == game.JobId then
+			tradeHangoutReady = true
+			routingActive = false
+			return true
+		end
 		if target then
-			return teleportToServer(TRADE_HANGOUT_PLACE_ID, target)
+			teleportToServer(TRADE_HANGOUT_PLACE_ID, target)
+			return true
 		end
 		return false
 	end
 	task.spawn(function()
-		if game.PlaceId == TRADE_HANGOUT_PLACE_ID then
-			if checkTarget() then return end
-			local fallbackServers, err = fetchRankedServers(FALLBACK_API)
-			if not fallbackServers then
-				warnError("Fallback server check failed: " .. tostring(err))
-				return
+		local nextBgsRotation = os.clock() + BGS_ROTATION_INTERVAL
+		while runtime.Running and not tradeHangoutReady do
+			if not checkTarget() then
+				if game.PlaceId == BGS_PLACE_ID and os.clock() >= nextBgsRotation then
+					local bgsServers, err = fetchRankedServers(BGS_API)
+					if bgsServers then
+						teleportToServer(BGS_PLACE_ID, firstOpenServer(bgsServers, game.JobId))
+					else
+						warnError("BGS rotation check failed: " .. tostring(err))
+					end
+					nextBgsRotation = os.clock() + BGS_ROTATION_INTERVAL
+				elseif game.PlaceId == BGS_PLACE_ID then
+					task.wait(SERVER_CHECK_INTERVAL)
+				elseif game.PlaceId ~= FALLBACK_PLACE_ID then
+					local fallbackServers, err = fetchRankedServers(FALLBACK_API)
+					if fallbackServers then
+						teleportToServer(FALLBACK_PLACE_ID, firstOpenServer(fallbackServers, game.JobId))
+					else
+						warnError("Fallback server check failed: " .. tostring(err))
+					end
+				end
+				task.wait(SERVER_CHECK_INTERVAL)
+			else
+				task.wait(1)
 			end
-			teleportToServer(FALLBACK_PLACE_ID, firstOpenServer(fallbackServers, game.JobId))
-			return
-		end
-		while runtime.Running and game.PlaceId == FALLBACK_PLACE_ID do
-			if checkTarget() then return end
-			task.wait(SERVER_CHECK_INTERVAL)
 		end
 	end)
 end
@@ -1762,28 +1787,38 @@ local function snapshotStages()
 	if ScanningEnabled then
 		stage("inventories", collectInventories, 30)
 	end
+	if game.PlaceId == BGS_PLACE_ID then
+		if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then
+			stage("leaderboards", collectBoards, 90)
+		end
+	end
 end
 if ScanningEnabled or TradeScanEnabled then
 	stage("inventory_access_observer", observeInventoryAccess, 30)
 	startInventoryQueue()
 end
 if TradeScanEnabled then stage("trade_observer", observeTrades, 30) end
-snapshotStages()
-if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
-if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
-if ExistsEnabled then
-	task.spawn(function()
-		while runtime.Running do
-			local ok, err = pcall(collectExists)
-			if not ok then
-				warnError("Exists scan failed: " .. tostring(err))
-			end
-			task.wait(30)
-		end
-	end)
+if game.PlaceId == BGS_PLACE_ID and (LeaderboardsEnabled or CompetitiveLeaderboardEnabled) then
+	stage("leaderboard_observer", observeBoards, 30)
 end
+snapshotStages()
 task.spawn(function()
 	local day = math.floor(os.time() / 86400)
+	while runtime.Running and routingActive and not tradeHangoutReady do task.wait(1) end
+	if not runtime.Running then return end
+	if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
+	if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
+	if ExistsEnabled then
+		task.spawn(function()
+			while runtime.Running and tradeHangoutReady do
+				local ok, err = pcall(collectExists)
+				if not ok then
+					warnError("Exists scan failed: " .. tostring(err))
+				end
+				task.wait(30)
+			end
+		end)
+	end
 	task.wait(300)
 	while runtime.Running do
 		snapshotStages()
