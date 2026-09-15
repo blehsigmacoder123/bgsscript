@@ -468,12 +468,6 @@ end
 local petOriginalStatKeys = parseOriginalStatKeys(readModuleSource(PetScript))
 local hatOriginalStatKeys = parseOriginalStatKeys(readModuleSource(HatScript))
 local ImageService = safeRequire(ImageScript)
-if ImageServiceEnabled then
-	enqueue("imageservice", {
-		Module = ImageScript:GetFullName(),
-		Source = readModuleSource(ImageScript),
-	})
-end
 local PetModule = safeRequire(PetScript)
 local HatModule = safeRequire(HatScript)
 local EggModule = safeRequire(EggScript)
@@ -1800,6 +1794,21 @@ local function snapshotStages()
 		end
 	end
 end
+local function collectImageService()
+	local Assets = requiredChild(ReplicatedStorage, "Assets")
+	local Modules = requiredChild(Assets, "Modules")
+	local ImageScript = requiredChild(Modules, "ImageService")
+	local success, source = pcall(function()
+		return ImageScript.Source
+	end)
+	if not success or type(source) ~= "string" or source == "" then
+		error("BGS: ImageService source is unavailable")
+	end
+	enqueue("imageservice", {
+		Module = ImageScript:GetFullName(),
+		Source = source,
+	})
+end
 if ScanningEnabled or TradeScanEnabled then
 	stage("inventory_access_observer", observeInventoryAccess, 30)
 	startInventoryQueue()
@@ -1809,6 +1818,9 @@ if game.PlaceId == BGS_PLACE_ID and (LeaderboardsEnabled or CompetitiveLeaderboa
 	stage("leaderboard_observer", observeBoards, 30)
 end
 snapshotStages()
+if ImageServiceEnabled then
+	stage("imageservice", collectImageService, 30)
+end
 task.spawn(function()
 	local day = math.floor(os.time() / 86400)
 	while runtime.Running and routingActive and not tradeHangoutReady do task.wait(1) end
