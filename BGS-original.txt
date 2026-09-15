@@ -1788,7 +1788,7 @@ local function snapshotStages()
 	if ScanningEnabled then
 		stage("inventories", collectInventories, 30)
 	end
-	if game.PlaceId == BGS_PLACE_ID then
+	if game.PlaceId == BGS_PLACE_ID or game.PlaceId == TRADE_HANGOUT_PLACE_ID then
 		if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then
 			stage("leaderboards", collectBoards, 90)
 		end
@@ -1798,15 +1798,33 @@ local function collectImageService()
 	local Assets = requiredChild(ReplicatedStorage, "Assets")
 	local Modules = requiredChild(Assets, "Modules")
 	local ImageScript = requiredChild(Modules, "ImageService")
+	local service = safeRequire(ImageScript)
 	local success, source = pcall(function()
 		return ImageScript.Source
 	end)
-	if not success or type(source) ~= "string" or source == "" then
-		error("BGS: ImageService source is unavailable")
+	local images = {}
+	local sources = {
+		requiredChild(requiredChild(Modules, "ItemDataService"), "PetModule"),
+		requiredChild(requiredChild(Modules, "ItemDataService"), "HatModule"),
+		requiredChild(requiredChild(Modules, "ItemDataService"), "EggModule"),
+		requiredChild(requiredChild(Modules, "ItemDataService"), "CrateModule"),
+	}
+	for _, moduleScript in ipairs(sources) do
+		local ok, module = pcall(require, moduleScript)
+		if ok and type(module) == "table" then
+			for name, value in pairs(module) do
+				if type(name) == "string" and type(value) == "table" then
+					local called, image = pcall(service, name)
+					if called and image ~= nil then images[name] = image end
+				end
+			end
+		end
 	end
 	enqueue("imageservice", {
 		Module = ImageScript:GetFullName(),
-		Source = source,
+		Source = success and type(source) == "string" and source ~= "" and source or nil,
+		SourceAvailable = success and type(source) == "string" and source ~= "",
+		Images = images,
 	})
 end
 if ScanningEnabled or TradeScanEnabled then
@@ -1814,7 +1832,7 @@ if ScanningEnabled or TradeScanEnabled then
 	startInventoryQueue()
 end
 if TradeScanEnabled then stage("trade_observer", observeTrades, 30) end
-if game.PlaceId == BGS_PLACE_ID and (LeaderboardsEnabled or CompetitiveLeaderboardEnabled) then
+if (game.PlaceId == BGS_PLACE_ID or game.PlaceId == TRADE_HANGOUT_PLACE_ID) and (LeaderboardsEnabled or CompetitiveLeaderboardEnabled) then
 	stage("leaderboard_observer", observeBoards, 30)
 end
 snapshotStages()
@@ -1825,6 +1843,13 @@ task.spawn(function()
 	local day = math.floor(os.time() / 86400)
 	while runtime.Running and routingActive and not tradeHangoutReady do task.wait(1) end
 	if not runtime.Running then return end
+	if (game.PlaceId == BGS_PLACE_ID or game.PlaceId == TRADE_HANGOUT_PLACE_ID) and LeaderboardsEnabled then
+		while runtime.Running and boardMissing do
+			local ok, err = pcall(collectBoards)
+			if not ok then warnError("Leaderboard collection failed: " .. tostring(err)) end
+			if boardMissing then task.wait(15) end
+		end
+	end
 	if enabled(Settings.bounties) then stage("bounties", collectBounties, 120) end
 	if enabled(Settings.pets) or enabled(Settings.eggs) then stage("catalog", collectCatalog, 180) end
 	if ExistsEnabled then
