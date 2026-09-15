@@ -92,11 +92,8 @@ local function responseBody(response)
 	return response and (response.Body or response.body or response.ResponseBody)
 end
 local BGS_PLACE_ID = 2512643572
-local BGS_API = "http://51.77.216.96:4564/2512643572"
 local TRADE_HANGOUT_PLACE_ID = 104280841513368
 local TRADE_HANGOUT_API = "http://51.77.216.96:4564/104280841513368"
-local FALLBACK_PLACE_ID = 127738893422250
-local FALLBACK_API = "http://51.77.216.96:4564/127738893422250"
 local SERVER_CHECK_INTERVAL = 60
 local BGS_ROTATION_INTERVAL = 240
 local serverHopInProgress = false
@@ -156,8 +153,17 @@ local function teleportToServer(placeId, server)
 	return true
 end
 local function routeTradeHangout()
-	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID and game.PlaceId ~= FALLBACK_PLACE_ID then return end
+	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
+	local function goToTradeHangout()
+		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+		if not remote or not remote:IsA("RemoteFunction") then
+			return false, "Trade Hangout remote is unavailable"
+		end
+		local ok, result = bounded(15, remote.InvokeServer, remote, "TradeTeleport")
+		if not ok then return false, tostring(result) end
+		return result == true, result == true and nil or "Trade Hangout teleport was rejected"
+	end
 	local function checkTarget()
 		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
 		if not servers then
@@ -179,28 +185,22 @@ local function routeTradeHangout()
 	task.spawn(function()
 		local nextBgsRotation = os.clock() + BGS_ROTATION_INTERVAL
 		while runtime.Running and not tradeHangoutReady do
-			if not checkTarget() then
-				if game.PlaceId == BGS_PLACE_ID and os.clock() >= nextBgsRotation then
-					local bgsServers, err = fetchRankedServers(BGS_API)
-					if bgsServers then
-						teleportToServer(BGS_PLACE_ID, firstOpenServer(bgsServers, game.JobId))
-					else
-						warnError("BGS rotation check failed: " .. tostring(err))
-					end
-					nextBgsRotation = os.clock() + BGS_ROTATION_INTERVAL
-				elseif game.PlaceId == BGS_PLACE_ID then
-					task.wait(SERVER_CHECK_INTERVAL)
-				elseif game.PlaceId ~= FALLBACK_PLACE_ID then
-					local fallbackServers, err = fetchRankedServers(FALLBACK_API)
-					if fallbackServers then
-						teleportToServer(FALLBACK_PLACE_ID, firstOpenServer(fallbackServers, game.JobId))
-					else
-						warnError("Fallback server check failed: " .. tostring(err))
-					end
-				end
+			if game.PlaceId == BGS_PLACE_ID then
+				local ok, err = goToTradeHangout()
+				if not ok then warnError("Go to Trade Hangout failed: " .. tostring(err)) end
 				task.wait(SERVER_CHECK_INTERVAL)
-			else
+			elseif checkTarget() then
 				task.wait(1)
+			elseif os.clock() >= nextBgsRotation then
+				local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
+				if servers then
+					teleportToServer(TRADE_HANGOUT_PLACE_ID, firstOpenServer(servers, game.JobId))
+				else
+					warnError("Trade Hangout rotation check failed: " .. tostring(err))
+				end
+				nextBgsRotation = os.clock() + BGS_ROTATION_INTERVAL
+			else
+				task.wait(SERVER_CHECK_INTERVAL)
 			end
 		end
 	end)
