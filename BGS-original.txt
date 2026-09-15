@@ -1,9 +1,10 @@
 local BGS_PAYLOAD_VERSION = "4"
-local BGS_PAYLOAD_REVISION = "trade-roster-board-loading-1"
+local BGS_PAYLOAD_REVISION = "inventory-queue-server-routing-1"
 local suppliedConfig = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
 local environment = type(getgenv) == "function" and getgenv() or _G
 local BGS = suppliedConfig or environment.BGS_CONFIG
 if type(BGS) ~= "table" or type(BGS.Settings) ~= "table" then
@@ -14,11 +15,10 @@ local Settings = BGS.Settings
 local function enabled(value)
 	return value == true or tostring(value):upper() == "ON"
 end
-local CompetitiveLeaderboardEnabled = enabled(Settings.competitiveLeaderboard)
-local LeaderboardsEnabled = enabled(Settings.leaderboards)
 local ExistsEnabled = enabled(Settings.exists)
 local TradeScanEnabled = enabled(Settings.tradeScan)
 local ScanningEnabled = enabled(Settings.scanning)
+local SERVER_RANK = math.max(1, math.floor(tonumber(Settings.serverRank) or 1))
 local BOUNTY_DAYS = 16
 local IMAGE_FALLBACK = "N/A"
 local THUMBNAIL_SIZE = "420x420"
@@ -88,6 +88,97 @@ local function responseStatus(response)
 end
 local function responseBody(response)
 	return response and (response.Body or response.body or response.ResponseBody)
+end
+local TRADE_HANGOUT_PLACE_ID = 2512643572
+local TRADE_HANGOUT_API = "http://51.77.216.96:4564/104280841513368"
+local FALLBACK_PLACE_ID = 127738893422250
+local FALLBACK_API = "http://51.77.216.96:4564/127738893422250"
+local SERVER_CHECK_INTERVAL = 60
+local serverHopInProgress = false
+local function fetchRankedServers(url)
+	local response = request({
+		Url = url,
+		Method = "GET",
+		Headers = {["Accept"] = "application/json"},
+	})
+	if responseStatus(response) ~= 200 then
+		return nil, "server list request returned HTTP " .. tostring(responseStatus(response))
+	end
+	local ok, decoded = pcall(HttpService.JSONDecode, HttpService, responseBody(response) or "")
+	if not ok or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		return nil, "server list response was invalid"
+	end
+	return decoded.data
+end
+local function firstOpenServer(servers, excludedJobId)
+	for _, server in ipairs(servers) do
+		if type(server) == "table"
+			and type(server.id) == "string"
+			and server.id ~= excludedJobId
+			and tonumber(server.playing)
+			and tonumber(server.maxPlayers)
+			and tonumber(server.playing) < tonumber(server.maxPlayers)
+		then
+			return server
+		end
+	end
+end
+local function rankedOpenServer(servers)
+	local server = servers[SERVER_RANK]
+	if type(server) == "table"
+		and type(server.id) == "string"
+		and tonumber(server.playing)
+		and tonumber(server.maxPlayers)
+		and tonumber(server.playing) < tonumber(server.maxPlayers)
+	then
+		return server
+	end
+end
+local function teleportToServer(placeId, server)
+	if serverHopInProgress or not server or not LocalPlayer then return false end
+	serverHopInProgress = true
+	local ok, err = pcall(function()
+		TeleportService:TeleportToPlaceInstance(placeId, server.id, LocalPlayer)
+	end)
+	if not ok then
+		serverHopInProgress = false
+		warnError("Server hop failed: " .. tostring(err))
+		return false
+	end
+	log("Joining ranked server " .. server.id .. " in place " .. tostring(placeId))
+	return true
+end
+local function routeTradeHangout()
+	if game.PlaceId ~= TRADE_HANGOUT_PLACE_ID and game.PlaceId ~= FALLBACK_PLACE_ID then return end
+	local function checkTarget()
+		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
+		if not servers then
+			warnError("Trade hangout server check failed: " .. tostring(err))
+			return false
+		end
+		local target = rankedOpenServer(servers)
+		if target and target.id == game.JobId then return true end
+		if target then
+			return teleportToServer(TRADE_HANGOUT_PLACE_ID, target)
+		end
+		return false
+	end
+	task.spawn(function()
+		if game.PlaceId == TRADE_HANGOUT_PLACE_ID then
+			if checkTarget() then return end
+			local fallbackServers, err = fetchRankedServers(FALLBACK_API)
+			if not fallbackServers then
+				warnError("Fallback server check failed: " .. tostring(err))
+				return
+			end
+			teleportToServer(FALLBACK_PLACE_ID, firstOpenServer(fallbackServers, game.JobId))
+			return
+		end
+		while runtime.Running and game.PlaceId == FALLBACK_PLACE_ID do
+			if checkTarget() then return end
+			task.wait(SERVER_CHECK_INTERVAL)
+		end
+	end)
 end
 local function jsonSafe(value, seen, depth)
 	local kind = typeof(value)
@@ -228,11 +319,6 @@ local function stage(name, callback, timeout)
 	end)
 end
 log("Payload v" .. BGS_PAYLOAD_VERSION .. " (" .. BGS_PAYLOAD_REVISION .. ") loaded; checking webhook delivery")
-local delivered, deliveryError = uploadJsonAttachment("startup.json", HttpService:JSONEncode(envelope("startup", {Message = "Exporter reached the webhook.", Settings = Settings})))
-if not delivered then
-	runtime.Running = false
-	error("BGS: " .. redact(deliveryError))
-end
 task.spawn(function()
 	while runtime.Running do
 		local item = table.remove(runtime.Queue, 1)
@@ -252,6 +338,7 @@ if not game:IsLoaded() or not LocalPlayer then
 	enqueue("startup_error", {Error = "Game or LocalPlayer unavailable after 30 seconds."})
 	return runtime
 end
+routeTradeHangout()
 local function safeRequire(module)
 local success, result = bounded(15, require, module)
 if not success then
@@ -990,8 +1077,7 @@ local function collectBounties()
 	end
 	enqueueContents("bounties", "{\n" .. table.concat(entries, ",\n") .. "\n}")
 	if not service then
-		enqueue("bounties_model", {SnapshotDate = BountyModel.Date, EggSource = "complete_inspected_snapshot", Eggs = BountyModel.Eggs, Pets = BountyModel.Pets, FavoredEggs = BountyModel.FavoredEggs, FavoredEggWeight = BountyModel.FavoredEggWeight})
-		log("Bounty model export queued. These predictions assume the inspected " .. BountyModel.Date .. " rules remain unchanged; they are not live-verified.")
+		log("Bounties were generated from the inspected " .. BountyModel.Date .. " rules because the live bounty service was unavailable.")
 	end
 end
 local BoardNames = {BubbleBoard = "bubbles", HatchBoard = "hatches", BubblerBoard = "competitive_bubbles", EggBoard = "competitive_hatches"}
@@ -1264,7 +1350,7 @@ local function timestamp()
 	return ok and type(value) == "number" and value or os.time()
 end
 local scanQueues = {trade = {}, public = {}, normal = {}}
-local scanPending, inventoryPrivate, privacyGeneration = {}, {}, {}
+local scanPending, inventoryPrivate, privacyGeneration, inventoryScanned = {}, {}, {}, {}
 local requestBusy = false
 local nextInventoryAt, nextTradeAt = 0, 0
 local tradeRosterPoll, tradeRosterNextAt = nil, math.huge
@@ -1301,6 +1387,7 @@ end
 local function queueInventory(player, reason)
 	if not ScanningEnabled or not runtime.Running or player.Parent ~= Players or inventoryPrivate[player] then return end
 	local priority = reason == "inventory_public"
+	if inventoryScanned[player] and not priority then return end
 	local existing = scanPending[player]
 	if existing then
 		if priority and existing.reason ~= reason then
@@ -1329,7 +1416,9 @@ local function updateInventoryPrivacy(player, private, baseline)
 	privacyGeneration[player] = (privacyGeneration[player] or 0) + 1
 	if private then
 		cancelInventoryScan(player)
+		inventoryScanned[player] = nil
 	elseif not baseline or previous == true then
+		inventoryScanned[player] = nil
 		queueInventory(player, "inventory_public")
 	end
 end
@@ -1375,6 +1464,7 @@ local function startInventoryQueue()
 						record.snapshotCapturedAt = timestamp()
 						enqueue("inventory_" .. tostring(player.UserId), record)
 						rememberExists(inventory.Pets)
+						inventoryScanned[player] = true
 					else
 						warnError(("Inventory unavailable for %s: %s."):format(player.Name, tostring(reason or inventory)))
 					end
@@ -1391,6 +1481,7 @@ local function startInventoryQueue()
 		table.clear(scanQueues.public)
 		table.clear(scanQueues.normal)
 		table.clear(scanPending)
+		table.clear(inventoryScanned)
 	end)
 end
 local function observeInventoryAccess()
@@ -1401,6 +1492,7 @@ local function observeInventoryAccess()
 	table.insert(connections, Players.PlayerRemoving:Connect(function(player)
 		cancelInventoryScan(player)
 		inventoryPrivate[player], privacyGeneration[player] = nil, nil
+		inventoryScanned[player] = nil
 	end))
 	local remote = requiredChild(ReplicatedStorage, "NetworkRemoteEvent")
 	assert(remote:IsA("RemoteEvent"), "BGS: inventory privacy event remote is unavailable.")
@@ -1520,7 +1612,7 @@ local function observeTrades()
 					record.snapshotCapturedAt = timestamp()
 					record.inventoryAvailable = ok and inventory ~= nil
 					record.tradeStateChangedDuringCapture = state.generation ~= event.generation or player.Parent ~= Players
-					enqueue(event.type .. "_" .. player.UserId .. "_" .. event.sequence, record, true)
+					enqueue(event.type .. "_" .. player.UserId, record, true)
 				end)
 				if not captured then warnError("Trade snapshot failed for " .. player.Name .. ": " .. tostring(err)) end
 				state.pending = state.pending - 1
@@ -1667,12 +1759,10 @@ local function observeTrades()
 		or "Watching own-trade events and polling public trade statuses every 5 seconds when permitted. First observations are baselines; trades between polls can be missed.")
 end
 local function snapshotStages()
-	if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboards", collectBoards) end
 	if ScanningEnabled then
 		stage("inventories", collectInventories, 30)
 	end
 end
-if LeaderboardsEnabled or CompetitiveLeaderboardEnabled then stage("leaderboard_observer", observeBoards, 30) end
 if ScanningEnabled or TradeScanEnabled then
 	stage("inventory_access_observer", observeInventoryAccess, 30)
 	startInventoryQueue()
