@@ -18,6 +18,7 @@ end
 local ExistsEnabled = enabled(Settings.exists)
 local TradeScanEnabled = enabled(Settings.tradeScan)
 local ScanningEnabled = enabled(Settings.scanning)
+local ImageServiceEnabled = enabled(Settings.imageService)
 local CompetitiveLeaderboardEnabled = enabled(Settings.competitiveLeaderboard)
 local LeaderboardsEnabled = enabled(Settings.leaderboards)
 local SERVER_RANK = math.max(1, math.floor(tonumber(Settings.serverRank) or 1))
@@ -467,6 +468,12 @@ end
 local petOriginalStatKeys = parseOriginalStatKeys(readModuleSource(PetScript))
 local hatOriginalStatKeys = parseOriginalStatKeys(readModuleSource(HatScript))
 local ImageService = safeRequire(ImageScript)
+if ImageServiceEnabled then
+	enqueue("imageservice", {
+		Module = ImageScript:GetFullName(),
+		Source = readModuleSource(ImageScript),
+	})
+end
 local PetModule = safeRequire(PetScript)
 local HatModule = safeRequire(HatScript)
 local EggModule = safeRequire(EggScript)
