@@ -1359,6 +1359,13 @@ local function inventoryRecord(player, inventory)
 		username = player.Name, userid = player.UserId, displayname = player.DisplayName,
 		pets = decodePets(inventory.Pets), hats = decodeHats(inventory.Hats),
 	}
+	local leaderstats = player:FindFirstChild("leaderstats")
+	local eggsOpened = leaderstats and leaderstats:FindFirstChild("Eggs Opened")
+	local bubblesBlown = leaderstats and leaderstats:FindFirstChild("Bubbles Blown")
+	if eggsOpened and eggsOpened:IsA("ValueBase") then record.eggsopened = eggsOpened.Value end
+	if bubblesBlown and bubblesBlown:IsA("ValueBase") then record.bubblesblown = bubblesBlown.Value end
+	local chatTitle = player:GetAttribute("BGSChatTitle")
+	if chatTitle ~= nil then record.BGSChatTitle = chatTitle end
 	local tags = {}
 	for _, key in ipairs({"ChatTags", "Title", "EquippedTitle", "PlayerTag"}) do
 		local value = player:GetAttribute(key)
