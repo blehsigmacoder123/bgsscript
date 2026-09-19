@@ -167,15 +167,21 @@ local function routeTradeHangout()
 				if horizontal <= target.Size.X / 2 and vertical < 5 then
 					humanoid:MoveTo(root.Position)
 					local untilTime = os.clock() + 5
+					local confirmButton
 					while os.clock() < untilTime do
 						local currentCharacter = LocalPlayer.Character
 						local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
 						if not currentRoot then break end
 						local currentHorizontal = (Vector2.new(currentRoot.Position.X, currentRoot.Position.Z) - Vector2.new(target.Position.X, target.Position.Z)).Magnitude
 						if currentHorizontal > target.Size.X / 2 or math.abs(currentRoot.Position.Y - target.Position.Y) >= 5 then break end
+						local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+						local prompt = playerGui and playerGui:FindFirstChild("TradeTeleportPrompt", true)
+						local panel = prompt and prompt:FindFirstChild("Panel")
+						local yes = panel and panel:FindFirstChild("Yes")
+						if prompt and prompt.Visible and yes and yes:IsA("GuiButton") then confirmButton = yes end
 						task.wait(0.1)
 					end
-					if os.clock() >= untilTime then return true end
+					if os.clock() >= untilTime and confirmButton then return true, confirmButton end
 				elseif os.clock() - lastMove >= 2 then
 					lastMove = os.clock()
 					humanoid:MoveTo(Vector3.new(target.Position.X, root.Position.Y, target.Position.Z))
@@ -186,15 +192,11 @@ local function routeTradeHangout()
 		return false, "Could not reach the Trade Teleport pad"
 	end
 	local function goToTradeHangout()
-		local reached, reachError = walkToTradeTeleport()
-		if not reached then return false, reachError end
-		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
-		if not remote or not remote:IsA("RemoteFunction") then
-			return false, "Trade Hangout remote is unavailable"
-		end
-		local ok, result = bounded(15, remote.InvokeServer, remote, "TradeTeleport")
-		if not ok then return false, tostring(result) end
-		return result == true, result == true and nil or "Trade Hangout teleport was rejected"
+		local reached, confirmButton = walkToTradeTeleport()
+		if not reached then return false, confirmButton end
+		local ok, err = pcall(function() confirmButton:Activate() end)
+		if not ok then return false, tostring(err) end
+		return true
 	end
 	local function checkTarget()
 		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
