@@ -152,33 +152,15 @@ end
 local function routeTradeHangout()
 	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
-	local function moveToTradeTeleport()
-		local deadline = os.clock() + 15
-		while os.clock() < deadline do
-			local activations = workspace:FindFirstChild("Activations")
-			local teleport = activations and activations:FindFirstChild("TradeTeleport")
-			local target = teleport and teleport:FindFirstChild("Root")
-			local character = LocalPlayer and LocalPlayer.Character
-			local root = character and character:FindFirstChild("HumanoidRootPart")
-			if target and target:IsA("BasePart") and root and root:IsA("BasePart") then
-				root.CFrame = target.CFrame + Vector3.new(0, 3, 0)
-				task.wait(0.75)
-				return true
-			end
-			task.wait(0.1)
-		end
-		return false, "Trade Teleport pad or character was unavailable"
-	end
 	local function goToTradeHangout()
-		local moved, moveError = moveToTradeTeleport()
-		if not moved then return false, moveError end
-		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
-		if not remote or not remote:IsA("RemoteFunction") then
-			return false, "Trade Hangout remote is unavailable"
+		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
+		if not servers then return false, "Trade Hangout server check failed: " .. tostring(err) end
+		local target = rankedOpenServer(servers)
+		if not target then return false, "No open ranked Trade Hangout server was found" end
+		if not teleportToServer(TRADE_HANGOUT_PLACE_ID, target) then
+			return false, "Trade Hangout teleport could not be started"
 		end
-		local ok, result = bounded(15, remote.InvokeServer, remote, "TradeTeleport")
-		if not ok then return false, tostring(result) end
-		return result == true, result == true and nil or "Trade Hangout teleport was rejected"
+		return true
 	end
 	local function checkTarget()
 		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
