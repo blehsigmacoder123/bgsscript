@@ -153,7 +153,7 @@ local function routeTradeHangout()
 	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
 	local function goToTradeHangout()
-		local remote = ReplicatedStorage:FindFirstChild("Network")
+		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
 		if not remote or not remote:IsA("RemoteFunction") then
 			return false, "Trade Hangout remote is unavailable"
 		end
