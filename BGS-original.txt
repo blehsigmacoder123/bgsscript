@@ -152,15 +152,49 @@ end
 local function routeTradeHangout()
 	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
-	local function goToTradeHangout()
-		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
-		if not servers then return false, "Trade Hangout server check failed: " .. tostring(err) end
-		local target = rankedOpenServer(servers)
-		if not target then return false, "No open ranked Trade Hangout server was found" end
-		if not teleportToServer(TRADE_HANGOUT_PLACE_ID, target) then
-			return false, "Trade Hangout teleport could not be started"
+	local function walkToTradeTeleport()
+		local deadline, lastMove = os.clock() + 45, 0
+		while os.clock() < deadline do
+			local activations = workspace:FindFirstChild("Activations")
+			local teleport = activations and activations:FindFirstChild("TradeTeleport")
+			local target = teleport and teleport:FindFirstChild("Root")
+			local character = LocalPlayer and LocalPlayer.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if target and target:IsA("BasePart") and root and root:IsA("BasePart") and humanoid then
+				local horizontal = (Vector2.new(root.Position.X, root.Position.Z) - Vector2.new(target.Position.X, target.Position.Z)).Magnitude
+				local vertical = math.abs(root.Position.Y - target.Position.Y)
+				if horizontal <= target.Size.X / 2 and vertical < 5 then
+					humanoid:MoveTo(root.Position)
+					local untilTime = os.clock() + 5
+					while os.clock() < untilTime do
+						local currentCharacter = LocalPlayer.Character
+						local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
+						if not currentRoot then break end
+						local currentHorizontal = (Vector2.new(currentRoot.Position.X, currentRoot.Position.Z) - Vector2.new(target.Position.X, target.Position.Z)).Magnitude
+						if currentHorizontal > target.Size.X / 2 or math.abs(currentRoot.Position.Y - target.Position.Y) >= 5 then break end
+						task.wait(0.1)
+					end
+					if os.clock() >= untilTime then return true end
+				elseif os.clock() - lastMove >= 2 then
+					lastMove = os.clock()
+					humanoid:MoveTo(Vector3.new(target.Position.X, root.Position.Y, target.Position.Z))
+				end
+			end
+			task.wait(0.1)
 		end
-		return true
+		return false, "Could not reach the Trade Teleport pad"
+	end
+	local function goToTradeHangout()
+		local reached, reachError = walkToTradeTeleport()
+		if not reached then return false, reachError end
+		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+		if not remote or not remote:IsA("RemoteFunction") then
+			return false, "Trade Hangout remote is unavailable"
+		end
+		local ok, result = bounded(15, remote.InvokeServer, remote, "TradeTeleport")
+		if not ok then return false, tostring(result) end
+		return result == true, result == true and nil or "Trade Hangout teleport was rejected"
 	end
 	local function checkTarget()
 		local servers, err = fetchRankedServers(TRADE_HANGOUT_API)
