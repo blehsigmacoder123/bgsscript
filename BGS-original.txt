@@ -1,17 +1,13 @@
 local BGS_PAYLOAD_VERSION = "4"
 local BGS_PAYLOAD_REVISION = "routing-phases-1"
-local suppliedConfig = ...
+local BGS = ...
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local environment = type(getgenv) == "function" and getgenv() or _G
-local BGS = suppliedConfig or environment.BGS_CONFIG
-if type(BGS) ~= "table" or type(BGS.Settings) ~= "table" then
-	error("BGS: missing private loader configuration")
-end
 local LocalPlayer
-local Settings = BGS.Settings
+local Settings = {competitiveLeaderboard = true, leaderboards = true, eggs = true, pets = true, bounties = true, exists = true, tradeScan = true, scanning = true, terminal = true, imageService = true, resolveImages = false, legacyImageFallback = false, serverRank = 1}
 local function enabled(value)
 	return value == true or tostring(value):upper() == "ON"
 end
@@ -36,7 +32,7 @@ or (fluxus and fluxus.request)
 assert(HttpRequest, "Your executor does not provide an HTTP request function.")
 assert(
 type(BGS.WEBHOOK_URL) == "string" and BGS.WEBHOOK_URL:match("^https://discord%.com/api/webhooks/%d+/[%w_%-]+"),
-"BGS: set a valid Discord webhook in the private loader."
+"BGS: missing a valid webhook."
 )
 if environment.BGS_RUN and environment.BGS_RUN.Running then
 	error("BGS: an exporter is already running; rejoin before restarting it.")
@@ -157,7 +153,7 @@ local function routeTradeHangout()
 	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
 	local function goToTradeHangout()
-		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
+		local remote = ReplicatedStorage:FindFirstChild("Network")
 		if not remote or not remote:IsA("RemoteFunction") then
 			return false, "Trade Hangout remote is unavailable"
 		end
