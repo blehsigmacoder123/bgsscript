@@ -152,7 +152,26 @@ end
 local function routeTradeHangout()
 	if game.PlaceId ~= BGS_PLACE_ID and game.PlaceId ~= TRADE_HANGOUT_PLACE_ID then return end
 	routingActive = true
+	local function moveToTradeTeleport()
+		local deadline = os.clock() + 15
+		while os.clock() < deadline do
+			local activations = workspace:FindFirstChild("Activations")
+			local teleport = activations and activations:FindFirstChild("TradeTeleport")
+			local target = teleport and teleport:FindFirstChild("Root")
+			local character = LocalPlayer and LocalPlayer.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if target and target:IsA("BasePart") and root and root:IsA("BasePart") then
+				root.CFrame = target.CFrame + Vector3.new(0, 3, 0)
+				task.wait(0.75)
+				return true
+			end
+			task.wait(0.1)
+		end
+		return false, "Trade Teleport pad or character was unavailable"
+	end
 	local function goToTradeHangout()
+		local moved, moveError = moveToTradeTeleport()
+		if not moved then return false, moveError end
 		local remote = ReplicatedStorage:FindFirstChild("NetworkRemoteFunction")
 		if not remote or not remote:IsA("RemoteFunction") then
 			return false, "Trade Hangout remote is unavailable"
