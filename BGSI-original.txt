@@ -1,0 +1,1204 @@
+local CONFIG_URL = "http://51.77.216.96:6103/config.txt"
+local CONFIG_RETRY_INTERVAL = 5
+local REQUIRED_SETTINGS = {
+	"competitiveLeaderboard",
+	"leaderboards",
+	"eggs",
+	"pets",
+	"bounties",
+	"exists",
+	"tradeScan",
+	"scanning",
+	"terminal",
+	"serverRank",
+	"serverType"
+}
+repeat task.wait() until game:IsLoaded()
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:GetService("VirtualUser")
+repeat task.wait() until Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+local function hasRequiredSettings(config)
+	for _, key in ipairs(REQUIRED_SETTINGS) do
+		if config.defaults[key] == nil then
+			return false
+		end
+	end
+	return type(config.plazas) == "table"
+		and type(config.plazas.Normal) == "table"
+		and type(config.plazas.Normal.plazaId) == "number"
+		and type(config.plazas.Normal.fallbackPlaceId) == "number"
+		and type(config.plazas.Pro) == "table"
+		and type(config.plazas.Pro.plazaId) == "number"
+end
+local function fetchConfig()
+	while true do
+		local ok, body = pcall(function()
+			return game:HttpGet(CONFIG_URL)
+		end)
+		if ok and type(body) == "string" then
+			local decodedOk, config = pcall(function()
+				return HttpService:JSONDecode(body)
+			end)
+			if decodedOk and type(config) == "table" and type(config.defaults) == "table" and type(config.users) == "table" and hasRequiredSettings(config) then
+				return config
+			end
+		end
+		warn("[Config] Waiting for a valid config.")
+		task.wait(CONFIG_RETRY_INTERVAL)
+	end
+end
+local function matchesUser(entry, player)
+	return tonumber(entry.userId) == player.UserId
+		or (type(entry.username) == "string" and entry.username:lower() == player.Name:lower())
+end
+local function getSettings(config, player)
+	local settings = {}
+	for key, value in pairs(config.defaults) do
+		settings[key] = value
+	end
+	for _, entry in ipairs(config.users) do
+		if type(entry) == "table" and matchesUser(entry, player) and type(entry.settings) == "table" then
+			for key, value in pairs(entry.settings) do
+				settings[key] = value
+			end
+			break
+		end
+	end
+	return settings
+end
+local Config = fetchConfig()
+local Settings = getSettings(Config, LocalPlayer)
+local function featureEnabled(value)
+	return value == true or tostring(value):upper() == "ON"
+end
+local CompetitiveLeaderboard = Settings.competitiveLeaderboard
+local Leaderboards = Settings.leaderboards
+local Eggs = Settings.eggs
+local Pets = Settings.pets
+local Bounties = Settings.bounties
+local Exists = Settings.exists
+local TradeScan = Settings.tradeScan
+local Scanning = Settings.scanning
+local Terminal = Settings.terminal
+local ServerRank = tonumber(Settings.serverRank) or 1
+local StandardLeaderboardsEnabled = featureEnabled(Leaderboards)
+local CompetitiveLeaderboardEnabled = featureEnabled(CompetitiveLeaderboard)
+local function isConfiguredUser(player)
+	for _, entry in ipairs(Config.users) do
+		if type(entry) == "table" and matchesUser(entry, player) then
+			return entry
+		end
+	end
+	return nil
+end
+local SUBMIT_URL = "http://51.77.216.96:8097/api/v1/ingest"
+local AUTH_KEY = "repla32213ceasd123qsadx1-with-123BGSI_IN123213GEST_TOKEN"
+local SelectedPlaza = tostring(Settings.serverType):lower() == "normal" and "Normal" or "Pro"
+local PlazaConfig = Config.plazas and Config.plazas[SelectedPlaza]
+if type(PlazaConfig) ~= "table" or type(PlazaConfig.plazaId) ~= "number" then
+	SelectedPlaza = "Pro"
+	PlazaConfig = Config.plazas and Config.plazas[SelectedPlaza]
+end
+local SERVER_PLACE_ID = PlazaConfig and PlazaConfig.plazaId or 127738893422250
+local NORMAL_AREA_PLACE_ID = Config.plazas
+	and Config.plazas.Normal
+	and Config.plazas.Normal.fallbackPlaceId
+	or 85896571713843
+local SERVER_API_URL = "http://51.77.216.96:4564/" .. SERVER_PLACE_ID
+local POST_INTERVAL = 60
+local LEADERBOARD_REQUEST_INTERVAL = 60
+local LEADERBOARD_RETRY_INTERVAL = 10
+local SEND_DELAY = 2
+local HttpRequest =
+	(syn and syn.request)
+	or (http and http.request)
+	or http_request
+	or (fluxus and fluxus.request)
+	or request
+local Remote = require(ReplicatedStorage.Shared.Framework.Network.Remote)
+local LeaderboardSerde = require(ReplicatedStorage.Shared.Utils.LeaderboardSerde)
+local LeaderboardUpdate = Remote.Event("LeaderboardUpdate")
+local STANDARD_BOARDS = {
+	{
+		name = "RebirthFuses",
+		types = { "AllTime", "Daily", "Weekly" }
+	},
+	{
+		name = "SecretsHatched",
+		types = { "AllTime", "Daily", "Weekly" }
+	},
+	{
+		name = "Hatches",
+		types = { "AllTime", "Daily", "Weekly" }
+	},
+	{
+		name = "Bubbles",
+		types = { "AllTime", "Daily", "Weekly" }
+	},
+	{
+		name = "FishCaught",
+		types = { "AllTime", "Daily", "Weekly" }
+	},
+	{
+		name = "GemGenie",
+		types = { "AllTime", "Daily", "Weekly" }
+	}
+}
+local DesiredBoardTypes = {}
+local StandardCache = {}
+local StandardHasData = false
+local PostingStandard = false
+local StandardPostPending = false
+local CompetitiveBoard = nil
+local CompetitiveChangeToken = 0
+for _, board in ipairs(STANDARD_BOARDS) do
+	DesiredBoardTypes[board.name] = {}
+	for _, boardType in ipairs(board.types) do
+		DesiredBoardTypes[board.name][boardType] = true
+	end
+end
+local function log(...)
+	print("[Leaderboards]", ...)
+end
+local function antiAfk()
+	pcall(function()
+		VirtualUser:CaptureController()
+		VirtualUser:ClickButton2(Vector2.new(0, 0))
+	end)
+end
+LocalPlayer.Idled:Connect(antiAfk)
+task.spawn(function()
+	while true do
+		task.wait(30)
+		antiAfk()
+	end
+end)
+local function nowStr()
+	local t = os.date("*t")
+	return string.format("%02d:%02d:%02d", t.hour, t.min, t.sec)
+end
+local function sendJsonFile(filename, data)
+	if not HttpRequest then
+		warn("[Leaderboards] No supported HTTP request function is available.")
+		return false
+	end
+	local ok, response = pcall(function()
+		return HttpRequest({
+			Url = SUBMIT_URL,
+			Method = "POST",
+			Headers = {
+				["Content-Type"] = "application/json",
+				["Authorization"] = "Bearer " .. AUTH_KEY
+			},
+			Body = HttpService:JSONEncode(data)
+		})
+	end)
+	if not ok then
+		warn("[Leaderboards] Failed sending " .. filename .. ": " .. tostring(response))
+		return false
+	end
+	local statusCode = response and response.StatusCode
+	if type(statusCode) == "number" and statusCode >= 200 and statusCode < 300 then
+		log("Sent", filename, statusCode)
+		return true
+	end
+	warn("[Leaderboards] Server rejected " .. filename .. " with status " .. tostring(statusCode))
+	return false
+end
+local function postCachedStandardLeaderboards()
+	local sentCount = 0
+	for _, board in ipairs(STANDARD_BOARDS) do
+		local cachedBoard = StandardCache[board.name]
+		if cachedBoard then
+			for _, boardType in ipairs(board.types) do
+				local entries = cachedBoard[boardType]
+				if entries then
+					sendJsonFile(
+						"leaderboard_" .. board.name .. "_" .. boardType .. ".json",
+						{
+							type = "leaderboard",
+							time = os.time(),
+							timestamp = nowStr(),
+							placeId = game.PlaceId,
+							jobId = game.JobId,
+							board = board.name,
+							boardType = boardType,
+							entries = entries
+						}
+					)
+					sentCount = sentCount + 1
+					task.wait(SEND_DELAY)
+				else
+					log("Missing cached leaderboard:", board.name, boardType)
+				end
+			end
+		else
+			log("Missing cached leaderboard board:", board.name)
+		end
+	end
+	if sentCount > 0 then
+		log("Finished posting", sentCount, "standard leaderboards.")
+	else
+		log("No standard leaderboard data is cached yet.")
+	end
+end
+local function requestStandardPost()
+	StandardPostPending = true
+	if PostingStandard then
+		log("Standard post already running. Queued another cycle.")
+		return
+	end
+	PostingStandard = true
+	task.spawn(function()
+		while StandardPostPending do
+			StandardPostPending = false
+			postCachedStandardLeaderboards()
+		end
+		PostingStandard = false
+	end)
+end
+local function normalizeCompetitiveEntries(decoded)
+	local entries = table.create(#decoded)
+	for rank, entry in ipairs(decoded) do
+		local output = {}
+		if type(entry) == "table" then
+			for key, value in pairs(entry) do
+				output[key] = value
+			end
+		else
+			output.Value = entry
+		end
+		output.Rank = rank
+		entries[rank] = output
+	end
+	return entries
+end
+local function postCompetitiveLeaderboard()
+	if not CompetitiveBoard then
+		log("Competitive leaderboard object is not available.")
+		return false
+	end
+	local ranksJson = CompetitiveBoard:GetAttribute("Ranks")
+	if type(ranksJson) ~= "string" or ranksJson == "" then
+		log("Competitive leaderboard has no Ranks data yet.")
+		return false
+	end
+	local decodeOk, decoded = pcall(function()
+		return HttpService:JSONDecode(ranksJson)
+	end)
+	if not decodeOk then
+		warn("[Leaderboards] Competitive Ranks data could not be decoded: " .. tostring(decoded))
+		return false
+	end
+	if type(decoded) ~= "table" then
+		warn("[Leaderboards] Competitive Ranks data was not a table.")
+		return false
+	end
+	local entries = normalizeCompetitiveEntries(decoded)
+	if #entries == 0 then
+		log("Competitive leaderboard data was received, but it is empty.")
+	else
+		log("Posting", #entries, "competitive teams.")
+	end
+	return sendJsonFile(
+		"leaderboard_Competitive_Global.json",
+		{
+			type = "leaderboard",
+			time = os.time(),
+			timestamp = nowStr(),
+			placeId = game.PlaceId,
+			jobId = game.JobId,
+			board = "Competitive",
+			boardType = "Global",
+			entries = entries
+		}
+	)
+end
+if StandardLeaderboardsEnabled then
+	LeaderboardUpdate:Connect(function(payload)
+	local ok, data = pcall(function()
+		return LeaderboardSerde.deserialize(payload)
+	end)
+	if not ok or type(data) ~= "table" then
+		warn("[Leaderboards] Failed to deserialize standard leaderboard data.")
+		return
+	end
+	local receivedData = false
+	for boardName, boardData in pairs(data) do
+		local desiredTypes = DesiredBoardTypes[boardName]
+		if desiredTypes and type(boardData) == "table" then
+			StandardCache[boardName] = StandardCache[boardName] or {}
+			for boardType, rawEntries in pairs(boardData) do
+				if desiredTypes[boardType] and type(rawEntries) == "table" then
+					local entries = table.create(#rawEntries)
+					for rank, entry in ipairs(rawEntries) do
+						entries[rank] = {
+							Rank = rank,
+							UserId = entry.UserId,
+							Amount = entry.Amount
+						}
+					end
+					StandardCache[boardName][boardType] = entries
+					receivedData = true
+				end
+			end
+		end
+	end
+	if receivedData then
+		local firstData = not StandardHasData
+		StandardHasData = true
+		log("Standard leaderboard cache updated.")
+		if firstData then
+			requestStandardPost()
+		end
+		end
+	end)
+end
+local function findCompetitiveBoard()
+	local worlds = workspace:WaitForChild("Worlds", 30)
+	if not worlds then
+		return nil
+	end
+	local overworld = worlds:WaitForChild("The Overworld", 30)
+	if not overworld then
+		return nil
+	end
+	local leaderboards = overworld:WaitForChild("Leaderboards", 30)
+	if not leaderboards then
+		return nil
+	end
+	return leaderboards:WaitForChild("Competitive", 30)
+end
+if CompetitiveLeaderboardEnabled then
+	task.spawn(function()
+		CompetitiveBoard = findCompetitiveBoard()
+		if not CompetitiveBoard then
+			warn("[Leaderboards] Competitive leaderboard object was not found.")
+			return
+		end
+		log("Competitive leaderboard object found.")
+		CompetitiveBoard:GetAttributeChangedSignal("Ranks"):Connect(function()
+			CompetitiveChangeToken = CompetitiveChangeToken + 1
+			local token = CompetitiveChangeToken
+			log("Competitive leaderboard changed. Waiting for data to settle.")
+			task.delay(2, function()
+				if token == CompetitiveChangeToken then
+					postCompetitiveLeaderboard()
+				end
+			end)
+		end)
+		if not postCompetitiveLeaderboard() then
+			log("Waiting for competitive leaderboard data.")
+		end
+	end)
+end
+if StandardLeaderboardsEnabled then
+	task.spawn(function()
+		while true do
+			local ok, err = pcall(function()
+				Remote:FireServer("RequestLeaderboardData")
+			end)
+			if ok then
+				log("Requested standard leaderboard data.")
+			else
+				warn("[Leaderboards] Failed requesting standard leaderboard data: " .. tostring(err))
+			end
+			if StandardHasData then
+				task.wait(LEADERBOARD_REQUEST_INTERVAL)
+			else
+				task.wait(LEADERBOARD_RETRY_INTERVAL)
+			end
+		end
+	end)
+end
+if StandardLeaderboardsEnabled or CompetitiveLeaderboardEnabled then
+	task.spawn(function()
+		while true do
+			task.wait(POST_INTERVAL)
+			if StandardLeaderboardsEnabled then
+				if StandardHasData then
+					requestStandardPost()
+				else
+					log("Standard leaderboard data has not been received yet.")
+				end
+			end
+			if CompetitiveLeaderboardEnabled then
+				postCompetitiveLeaderboard()
+			end
+		end
+	end)
+end
+local directTypes = {
+	["nil"] = true,
+	["boolean"] = true,
+	["number"] = true,
+	["string"] = true
+}
+local function serialize(value, seen)
+	local valueType = typeof(value)
+	if directTypes[valueType] then
+		return value
+	end
+	if valueType == "table" then
+		seen = seen or {}
+		if seen[value] then
+			return "<cycle>"
+		end
+		seen[value] = true
+		local result = {}
+		for key, item in pairs(value) do
+			result[tostring(key)] = serialize(item, seen)
+		end
+		seen[value] = nil
+		return result
+	end
+	if valueType == "Color3" then
+		return { r = value.R, g = value.G, b = value.B }
+	end
+	if valueType == "Vector2" then
+		return { x = value.X, y = value.Y }
+	end
+	if valueType == "Vector3" then
+		return { x = value.X, y = value.Y, z = value.Z }
+	end
+	if valueType == "CFrame" then
+		return { value:GetComponents() }
+	end
+	if valueType == "UDim" then
+		return { scale = value.Scale, offset = value.Offset }
+	end
+	if valueType == "UDim2" then
+		return { x = serialize(value.X), y = serialize(value.Y) }
+	end
+	if valueType == "Instance" then
+		return value:GetFullName()
+	end
+	return tostring(value)
+end
+local Time = require(ReplicatedStorage.Shared.Framework.Utilities.Math.Time)
+local EggData = require(ReplicatedStorage.Shared.Data.Eggs)
+local PetData = require(ReplicatedStorage.Shared.Data.Pets)
+local PetUtil = require(ReplicatedStorage.Shared.Utils.Stats.PetUtil)
+local BountyUtil = require(ReplicatedStorage.Shared.Utils.Stats.SecretBountyUtil)
+local BountyPets = getupvalue(BountyUtil.Get, 2)
+local PossibleEggs = {
+	"Common Egg",
+	"Vine Egg",
+	"Lava Egg",
+	"Atlantis Egg",
+	"Classic Egg",
+	"Neon Egg",
+	"Hell Egg",
+	"Mining Egg",
+	"Spikey Egg",
+	"Nightmare Egg",
+	"Lunar Egg",
+	"Void Egg",
+	"Magma Egg",
+	"Cyber Egg",
+	"Rainbow Egg",
+	"Crystal Egg"
+}
+local ThumbnailCache = {}
+local Months = {
+	"January",
+	"February",
+	"March",
+	"April",
+	"May",
+	"June",
+	"July",
+	"August",
+	"September",
+	"October",
+	"November",
+	"December"
+}
+local function getOrdinalSuffix(day)
+	if day % 100 >= 11 and day % 100 <= 13 then
+		return "th"
+	end
+	local lastDigit = day % 10
+	if lastDigit == 1 then
+		return "st"
+	elseif lastDigit == 2 then
+		return "nd"
+	elseif lastDigit == 3 then
+		return "rd"
+	end
+	return "th"
+end
+local function formatBountyDate(timestamp)
+	local date = os.date("!*t", timestamp)
+	return Months[date.month] .. " " .. date.day .. getOrdinalSuffix(date.day) .. ", " .. date.year
+end
+local function getBountySeed(offset)
+	local day = Time.now() / Time.secondsInDay
+	return math.floor(day) - 1 + offset
+end
+local function getBounty(offset)
+	local seed = getBountySeed(offset)
+	local previousRandom = Random.new(seed - 1)
+	local currentRandom = Random.new(seed)
+	local previousPetIndex = previousRandom:NextInteger(1, #BountyPets)
+	local petIndex = currentRandom:NextInteger(1, #BountyPets)
+	if petIndex == previousPetIndex then
+		petIndex = petIndex % #BountyPets + 1
+	end
+	local previousEggIndex = previousRandom:NextInteger(1, #PossibleEggs)
+	local eggIndex = currentRandom:NextInteger(1, #PossibleEggs)
+	if eggIndex == previousEggIndex then
+		eggIndex = eggIndex % #PossibleEggs + 1
+	end
+	local pet = BountyPets[petIndex]
+	return {
+		Name = pet.Name,
+		Chance = pet.Chance,
+		Egg = PossibleEggs[eggIndex]
+	}
+end
+local function isSecretPet(petName)
+	local petData = PetData[petName]
+	if petData then
+		if petData.Secret == true then
+			return true
+		end
+		local rarity = petData.Rarity
+		if type(rarity) == "string" and rarity:lower() == "secret" then
+			return true
+		end
+	end
+	for _, pet in ipairs(BountyPets) do
+		if pet.Name == petName then
+			return true
+		end
+	end
+	return false
+end
+local function getPetRarity(petName)
+	if isSecretPet(petName) then
+		return "Secret"
+	end
+	local petData = PetData[petName]
+	if petData and type(petData.Rarity) == "string" then
+		return petData.Rarity
+	end
+	return "Legendary"
+end
+local function getAssetId(value)
+	if type(value) == "number" then
+		return string.format("%.0f", value)
+	end
+	if type(value) ~= "string" then
+		return nil
+	end
+	return value:match("%d+")
+end
+local function resolveAssetImages(assetIds)
+	local unresolved = {}
+	local added = {}
+	for _, assetId in ipairs(assetIds) do
+		if assetId and not ThumbnailCache[assetId] and not added[assetId] then
+			added[assetId] = true
+			table.insert(unresolved, assetId)
+		end
+	end
+	if #unresolved == 0 then
+		return
+	end
+	local url = "https://thumbnails.roblox.com/v1/assets?assetIds="
+		.. table.concat(unresolved, ",")
+		.. "&returnPolicy=PlaceHolder&size=420x420&format=Png&isCircular=false"
+	local ok, body = pcall(function()
+		return game:HttpGet(url)
+	end)
+	if not ok or type(body) ~= "string" or body == "" then
+		warn("[Bounties] Failed requesting Roblox image URLs.")
+		return
+	end
+	local decodeOk, response = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+	if not decodeOk or type(response) ~= "table" or type(response.data) ~= "table" then
+		warn("[Bounties] Failed decoding Roblox image URLs.")
+		return
+	end
+	for _, item in ipairs(response.data) do
+		if item.targetId and item.imageUrl then
+			ThumbnailCache[tostring(item.targetId)] = item.imageUrl
+		end
+	end
+end
+local function postGameData()
+	if featureEnabled(Eggs) or featureEnabled(Pets) then
+		sendJsonFile("catalog.json", {
+			type = "catalog",
+			pets = featureEnabled(Pets) and serialize(PetData) or {},
+			eggs = featureEnabled(Eggs) and serialize(EggData) or {}
+		})
+	end
+end
+task.spawn(function()
+	while true do
+		local ok, err = pcall(postGameData)
+		if not ok then
+			warn("[Data] Failed posting eggs or pets: " .. tostring(err))
+		end
+		task.wait(POST_INTERVAL)
+	end
+end)
+local function postBounties()
+	if not featureEnabled(Bounties) then
+		return false
+	end
+	local currentTime = Time.now()
+	local output = {
+		bounties = {}
+	}
+	for offset = 0, 15 do
+		local bounty = getBounty(offset)
+		table.insert(output.bounties, {
+			date = os.date("!%Y-%m-%d", currentTime + offset * Time.secondsInDay),
+			pet = bounty.Name,
+			egg = bounty.Egg,
+			odds = "1/" .. string.format("%.0f", math.ceil(100 / bounty.Chance))
+		})
+	end
+	local sent = sendJsonFile("bounties.json", output)
+	if sent then
+		log("Posted 16 future bounties.")
+	end
+	return sent
+end
+if featureEnabled(Bounties) then
+	task.spawn(function()
+		while true do
+			local ok, err = pcall(postBounties)
+			if not ok then
+				warn("[Bounties] Failed posting bounties: " .. tostring(err))
+			end
+			task.wait(POST_INTERVAL)
+		end
+	end)
+else
+	log("Bounties disabled.")
+end
+local EXISTS_VARIANT_DELAY = 8
+local EXISTS_PET_DELAY = 5
+local EXISTS_PASS_DELAY = 30
+local EXISTS_ZERO_CONFIRMATIONS = 3
+local EXISTS_ZERO_RETRY_DELAY = 15
+local EXISTS_RETRY_DELAY = 15
+local EXISTS_MAX_RETRY_DELAY = 60
+local function supportsMythic(petData)
+	return petData.Mythic == true or petData.Rarity == "Secret"
+end
+local function isSecretPetData(petData)
+	return petData.Secret == true or petData.Rarity == "Secret"
+end
+local function getExistingPetCount(pet)
+	local zeroConfirmations = 0
+	local retryDelay = EXISTS_RETRY_DELAY
+	while true do
+		local ok, result = pcall(function()
+			return Remote:InvokeServer("GetExisting", PetUtil:GetName(pet))
+		end)
+		local count = ok and tonumber(result)
+		if count and count > 0 then
+			return math.floor(count)
+		end
+		if count == 0 then
+			zeroConfirmations = zeroConfirmations + 1
+			if zeroConfirmations >= EXISTS_ZERO_CONFIRMATIONS then
+				return 0
+			end
+			task.wait(EXISTS_ZERO_RETRY_DELAY)
+		else
+			zeroConfirmations = 0
+			task.wait(retryDelay)
+			retryDelay = math.min(retryDelay * 2, EXISTS_MAX_RETRY_DELAY)
+		end
+	end
+end
+local function getExistingVariant(petName, shiny, mythic, xl)
+	local count = getExistingPetCount({
+		Name = petName,
+		Shiny = shiny,
+		Mythic = mythic,
+		XL = xl
+	})
+	task.wait(EXISTS_VARIANT_DELAY)
+	return count
+end
+local function createExistsEntry(petName, petData)
+	local variants = {
+		normal = 0,
+		shiny = 0,
+		xl = {
+			normal = 0,
+			shiny = 0
+		}
+	}
+	if supportsMythic(petData) then
+		variants.mythic = 0
+		variants.mythicShiny = 0
+		variants.xl.mythic = 0
+		variants.xl.mythicShiny = 0
+	end
+	return {
+		name = petName,
+		exists = variants
+	}
+end
+local function scanExistsEntry(entry)
+	local variants = entry.exists
+	variants.normal = getExistingVariant(entry.name, false, false, false)
+	variants.shiny = getExistingVariant(entry.name, true, false, false)
+	if variants.mythic ~= nil then
+		variants.mythic = getExistingVariant(entry.name, false, true, false)
+		variants.mythicShiny = getExistingVariant(entry.name, true, true, false)
+	end
+	variants.xl.normal = getExistingVariant(entry.name, false, false, true)
+	variants.xl.shiny = getExistingVariant(entry.name, true, false, true)
+	if variants.xl.mythic ~= nil then
+		variants.xl.mythic = getExistingVariant(entry.name, false, true, true)
+		variants.xl.mythicShiny = getExistingVariant(entry.name, true, true, true)
+	end
+end
+if featureEnabled(Exists) then
+	task.spawn(function()
+		local entries = {}
+		for petName, petData in pairs(PetData) do
+			if isSecretPetData(petData) then
+				table.insert(entries, createExistsEntry(petName, petData))
+			end
+		end
+		table.sort(entries, function(left, right)
+			return left.name < right.name
+		end)
+		while true do
+			for _, entry in ipairs(entries) do
+				local ok, err = pcall(scanExistsEntry, entry)
+				if not ok then
+					warn("[Exists] Failed scanning " .. entry.name .. ": " .. tostring(err))
+				else
+					sendJsonFile("exists.json", entry)
+				end
+				task.wait(EXISTS_PET_DELAY)
+			end
+			task.wait(EXISTS_PASS_DELAY)
+		end
+	end)
+else
+	log("Exists disabled.")
+end
+do
+	local function scannerLog(...)
+		print("[Scanner]", ...)
+	end
+	local function getAvatar(userId)
+		local url = "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds="
+			.. userId .. "&size=150x150&format=Png&isCircular=false"
+		local ok, response = pcall(function()
+			return game:HttpGet(url)
+		end)
+		if ok then
+			local decodedOk, data = pcall(function()
+				return HttpService:JSONDecode(response)
+			end)
+			if decodedOk and data and data.data and data.data[1] then
+				return data.data[1].imageUrl
+			end
+		end
+		return nil
+	end
+	local function parseChatTags(raw)
+		local textParts = {}
+		local colorParts = {}
+		if type(raw) ~= "string" or raw == "" then
+			return {
+				Text = "",
+				Colors = ""
+			}
+		end
+		for color, text in raw:gmatch("<font%s+color=['\"](#%x%x%x%x%x%x)['\"]>(.-)</font>") do
+			table.insert(textParts, text)
+			table.insert(colorParts, color)
+		end
+		if #textParts == 0 then
+			return {
+				Text = raw,
+				Colors = ""
+			}
+		end
+		return {
+			Text = table.concat(textParts, ""),
+			Colors = table.concat(colorParts, ",")
+		}
+	end
+	local function getLeaderstatsTable(player)
+		local leaderstats = player:FindFirstChild("leaderstats") or player:WaitForChild("leaderstats", 10)
+		local result = {}
+		if not leaderstats then
+			return result
+		end
+		for _, stat in ipairs(leaderstats:GetChildren()) do
+			if stat:IsA("ValueBase") then
+				result[stat.Name] = stat.Value
+			end
+		end
+		return result
+	end
+	local function buildProfile(player)
+		local chatTags = parseChatTags(player:GetAttribute("ChatTags"))
+		return {
+			username = player.Name,
+			displayname = player.DisplayName,
+			userid = player.UserId,
+			avatar = getAvatar(player.UserId),
+			["Attribute Script"] = {
+				ChatTags = {
+					Text = chatTags.Text,
+					Colors = chatTags.Colors
+				},
+				CanChat = player:GetAttribute("CanChat")
+			},
+			leaderstats = getLeaderstatsTable(player)
+		}
+	end
+	local function isExcludedPlayer(player)
+		local entry = player and isConfiguredUser(player)
+		return entry and entry.excludeFromScanning == true
+	end
+	local retrying = false
+	local targetJobId = nil
+	local targetPlaceId = nil
+	local function fetchServers()
+		local ok, body = pcall(function()
+			return game:HttpGet(SERVER_API_URL)
+		end)
+		if not ok or type(body) ~= "string" then
+			return nil
+		end
+		local decoded
+		if not pcall(function()
+			decoded = HttpService:JSONDecode(body)
+		end) then
+			return nil
+		end
+		if type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+			return nil
+		end
+		table.sort(decoded.data, function(a, b)
+			return (tonumber(a.playing) or 0) > (tonumber(b.playing) or 0)
+		end)
+		return decoded.data
+	end
+	local function teleportToTarget(placeId, jobId)
+		retrying = true
+		targetPlaceId = placeId
+		targetJobId = jobId
+		pcall(function()
+			if jobId then
+				TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+			else
+				TeleportService:Teleport(placeId, LocalPlayer)
+			end
+		end)
+	end
+	local function goToNormalArea()
+		if game.PlaceId ~= NORMAL_AREA_PLACE_ID then
+			teleportToTarget(NORMAL_AREA_PLACE_ID, nil)
+		end
+	end
+	local function checkAndHop()
+		local servers = fetchServers()
+		if not servers or #servers == 0 then
+			goToNormalArea()
+			return false
+		end
+		local rank = math.max(1, math.floor(ServerRank))
+		if rank > #servers then
+			rank = 1
+		end
+		local target = servers[rank]
+		if not target or type(target.id) ~= "string" or target.id == "" then
+			goToNormalArea()
+			return false
+		end
+		if game.PlaceId == SERVER_PLACE_ID and target.id == game.JobId then
+			retrying = false
+			targetJobId = nil
+			targetPlaceId = nil
+			scannerLog("Correct server rank:", rank)
+			return true
+		end
+		teleportToTarget(SERVER_PLACE_ID, target.id)
+		return false
+	end
+	TeleportService.TeleportInitFailed:Connect(function(player)
+		if player ~= LocalPlayer or not retrying or not targetPlaceId then
+			return
+		end
+		task.delay(15, function()
+			if retrying and targetPlaceId then
+				teleportToTarget(targetPlaceId, targetJobId)
+			end
+		end)
+	end)
+	task.spawn(function()
+		task.wait(0.5)
+		local delay = checkAndHop() and 900 or 60
+		while true do
+			task.wait(delay)
+			delay = checkAndHop() and 900 or 60
+		end
+	end)
+	if Scanning or TradeScan then
+		local SCAN_DELAY = 3.25
+		local VIEW_RETRIES = 5
+		local VIEW_RETRY_DELAY = 2
+		local inventoryQueue = {}
+		local tradeQueue = {}
+		local inventoryPending = {}
+		local inventoryScanned = {}
+		local tradingStates = {}
+		local scanProcessing = false
+		local function canScanPlayer(player)
+			return player
+				and player.Parent == Players
+				and not isExcludedPlayer(player)
+				and player:GetAttribute("InventoryViewingAllowed") == true
+		end
+		local function tryViewInventory(player)
+			for attempt = 1, VIEW_RETRIES do
+				if not canScanPlayer(player) then
+					return false, nil
+				end
+				scannerLog("TradeViewInventory attempt:", attempt, player.Name, player.UserId)
+				local ok, result = pcall(function()
+					return Remote:InvokeServer("TradeViewInventory", player)
+				end)
+				if ok and type(result) == "table" and canScanPlayer(player) then
+					return true, result
+				end
+				if attempt < VIEW_RETRIES then
+					task.wait(VIEW_RETRY_DELAY)
+				end
+			end
+			return false, nil
+		end
+		local function buildInventoryPayload(player, inventory)
+			return {
+				type = "inventory",
+				time = os.time(),
+				timestamp = nowStr(),
+				placeId = game.PlaceId,
+				jobId = game.JobId,
+				profile = buildProfile(player),
+				inventory = inventory
+			}
+		end
+		local function buildTradePayload(player, inventory, status)
+			return {
+				type = "trade_snapshot",
+				status = status,
+				time = os.time(),
+				timestamp = nowStr(),
+				placeId = game.PlaceId,
+				jobId = game.JobId,
+				profile = buildProfile(player),
+				inventory = inventory
+			}
+		end
+		local function processScanQueue()
+			if scanProcessing then
+				return
+			end
+			scanProcessing = true
+			while true do
+				local entry = table.remove(tradeQueue, 1)
+				if not entry then
+					entry = table.remove(inventoryQueue, 1)
+				end
+				if not entry then
+					scanProcessing = false
+					return
+				end
+				local player = entry.player
+				local ok, inventory = tryViewInventory(player)
+				if entry.kind == "inventory" then
+					inventoryPending[player.UserId] = nil
+					if ok then
+						local payload = buildInventoryPayload(player, inventory)
+						if canScanPlayer(player) then
+							inventoryScanned[player.UserId] = true
+							scannerLog("Scanned player:", player.Name, player.UserId)
+							sendJsonFile(
+								"inventory_" .. tostring(player.Name) .. "_" .. tostring(player.UserId) .. ".json",
+								payload
+							)
+						else
+							scannerLog("Inventory viewing disabled before upload:", player.Name, player.UserId)
+						end
+					else
+						scannerLog("Inventory scan failed:", player.Name, player.UserId)
+					end
+				elseif ok then
+					local payload = buildTradePayload(player, inventory, entry.status)
+					if canScanPlayer(player) then
+						scannerLog("Captured trade snapshot:", entry.status, player.Name, player.UserId)
+						sendJsonFile(
+							"trade_snapshot_"
+								.. tostring(player.Name)
+								.. "_"
+								.. tostring(player.UserId)
+								.. "_"
+								.. entry.status
+								.. "_"
+								.. tostring(os.time())
+								.. ".json",
+							payload
+						)
+					else
+						scannerLog("Inventory viewing disabled before trade upload:", player.Name, player.UserId)
+					end
+				else
+					scannerLog("Trade snapshot failed:", entry.status, player.Name, player.UserId)
+				end
+				task.wait(SCAN_DELAY)
+			end
+		end
+		local function startScanQueue()
+			task.spawn(processScanQueue)
+		end
+		local function queueInventory(player)
+			if not Scanning or not canScanPlayer(player) then
+				return
+			end
+			if inventoryPending[player.UserId] or inventoryScanned[player.UserId] then
+				return
+			end
+			inventoryPending[player.UserId] = true
+			table.insert(inventoryQueue, {
+				kind = "inventory",
+				player = player
+			})
+			scannerLog("Queued inventory:", player.Name, player.UserId, "QueueSize:", #inventoryQueue)
+			startScanQueue()
+		end
+		local function queueTradeSnapshot(player, status)
+			if not TradeScan or not canScanPlayer(player) then
+				return
+			end
+			table.insert(tradeQueue, {
+				kind = "trade",
+				player = player,
+				status = status
+			})
+			scannerLog("Queued trade snapshot:", status, player.Name, player.UserId, "QueueSize:", #tradeQueue)
+			startScanQueue()
+		end
+		local function removeQueuedInventory(player)
+			local removed = false
+			for index = #inventoryQueue, 1, -1 do
+				if inventoryQueue[index].player == player then
+					table.remove(inventoryQueue, index)
+					removed = true
+				end
+			end
+			if removed then
+				inventoryPending[player.UserId] = nil
+			end
+		end
+		local function removeQueuedTrades(player)
+			for index = #tradeQueue, 1, -1 do
+				if tradeQueue[index].player == player then
+					table.remove(tradeQueue, index)
+				end
+			end
+		end
+		local function watchPlayer(player)
+			if Scanning then
+				player:GetAttributeChangedSignal("InventoryViewingAllowed"):Connect(function()
+					if player:GetAttribute("InventoryViewingAllowed") == true then
+						queueInventory(player)
+					else
+						removeQueuedInventory(player)
+						scannerLog("Inventory viewing disabled:", player.Name, player.UserId)
+					end
+				end)
+				queueInventory(player)
+			end
+			if TradeScan then
+				tradingStates[player.UserId] = player:GetAttribute("Trading") == true
+				player:GetAttributeChangedSignal("Trading"):Connect(function()
+					local oldValue = tradingStates[player.UserId]
+					local newValue = player:GetAttribute("Trading") == true
+					if oldValue == newValue then
+						return
+					end
+					tradingStates[player.UserId] = newValue
+					if newValue then
+						queueTradeSnapshot(player, "trade_started")
+					else
+						queueTradeSnapshot(player, "trade_ended")
+					end
+				end)
+			end
+		end
+		for _, player in ipairs(Players:GetPlayers()) do
+			watchPlayer(player)
+		end
+		Players.PlayerAdded:Connect(watchPlayer)
+		Players.PlayerRemoving:Connect(function(player)
+			removeQueuedInventory(player)
+			removeQueuedTrades(player)
+			inventoryPending[player.UserId] = nil
+			inventoryScanned[player.UserId] = nil
+			tradingStates[player.UserId] = nil
+		end)
+	end
+	if Terminal then
+		local function formatItem(item)
+			if item.Type == "Pet" then
+				local prefix = ""
+				if item.Shiny and item.Mythic then
+					prefix = "Shiny Mythic "
+				elseif item.Shiny then
+					prefix = "Shiny "
+				elseif item.Mythic then
+					prefix = "Mythic "
+				end
+				return prefix .. item.Name
+			end
+			return item.Type
+		end
+		Remote.Event("TradingTerminalAddPost"):Connect(function(post)
+			local output = {
+				AuthorUsername = post.Author.Username,
+				AuthorUserId = post.Author.UserId,
+				Offering = {},
+				Wants = {},
+				Timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				type = "terminal_post",
+				placeId = game.PlaceId,
+				jobId = game.JobId
+			}
+			for _, item in ipairs(post.Body.Offering) do
+				table.insert(output.Offering, formatItem(item))
+			end
+			for _, item in ipairs(post.Body.Wants) do
+				table.insert(output.Wants, formatItem(item))
+			end
+			sendJsonFile(
+				"terminal_" .. tostring(output.AuthorUsername) .. "_" .. tostring(os.time()) .. ".json",
+				output
+			)
+		end)
+	end
+end
