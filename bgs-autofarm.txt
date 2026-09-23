@@ -1,0 +1,302 @@
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local player = Players.LocalPlayer
+local remoteEvent = ReplicatedStorage:WaitForChild("NetworkRemoteEvent")
+local remoteFunction = ReplicatedStorage:WaitForChild("NetworkRemoteFunction")
+local leaderstats = player:WaitForChild("leaderstats")
+local eggsOpened = leaderstats:WaitForChild("Eggs Opened")
+
+local settings = {
+    hatchTarget = 3000,
+    requestDelay = 0.45,
+    hatchDelay = 4.25,
+    codes = {
+        "BGSISBACK", "Celebration", "Update84", "MechRobot", "CrashFix", "Update82",
+        "AlienInvasion", "MythicFallenAngel", "Update81", "SorryShutdown", "PermMythic", "20HourLuck",
+        "Update78", "FrostPortal", "SuperSpooky", "Update77", "Glitch", "Update75",
+        "Easter21", "Update74", "Luckiest", "Update73", "StPatrickLuck", "Update72",
+        "BlizzyrdBest", "SylentlyBest", "hiddenvideocode", "Update71", "Valentine", "LuckyCode",
+        "RumbleStream", "BlizzyWizzy", "BGSStream", "Update70", "Royalty", "Update68",
+        "2020", "SANTACLAUS", "CHRISTMASSTREAM", "SUPERBOOST", "JollyChristmas2", "JollyChristmas",
+        "ChristmasPart2", "Update67", "Christmas2020", "EpicSecretCode", "BGSXMAS", "Jonathan",
+        "KingSlimeGang", "KingMushGang", "ChristmasHype", "HappyHolidays", "RUDOLPH", "MILKANDCOOKIES",
+        "StreamLuck", "CANDYCANE", "StreamSpeed", "ShinyStream", "MythicStream", "SecretVideoCode",
+        "Update65", "Split", "SylentlyOP", "FreeSpeedBoost", "YouTubeLuck", "BlizzyrdOP",
+        "SuperSecretCode", "YouTubeSpeed", "SpookyCode", "300k", "Youtube", "Ghosts",
+        "Update64", "Costume", "Update63", "FreeDominusPet", "SpookyHalloween", "AutumnSale",
+        "AutumnSale2", "Update61", "Autumn", "Update60", "Citrus", "Update59",
+        "Vacation", "Update58", "Carnival2", "Update57", "Carnival", "MegaLuckBoost",
+        "MegaSpeedBoost", "Update55", "SuperSale", "Update54", "Shadow", "Update53",
+        "Meteor", "Update52", "Vine", "Update51", "Spring", "Update50",
+        "Mythic", "Update49", "Merchant", "Update48", "Season 8", "Update47",
+        "Eeaster2020", "Update46", "Mushroom", "Update45", "Mystic", "Season7",
+        "NewEgg", "Challenges", "Galactic", "Portal", "LuckyDay2", "FreeSpeed",
+        "MegaSale", "600M", "600MBoost", "Valentines", "Cupid", "sircfennerNoob",
+        "Part2", "Clown", "Circus", "ChristmasBoost", "HammieIsBadAtRocketLeague", "FreeHatchSpeed",
+        "Season3", "Halloween", "TrickOrTreat", "Pass", "Secrets", "BubblePass",
+        "Fancy", "Fancy2", "ReallyFancy", "2hourluck", "July4th", "UncleSam",
+        "Fireworks", "Summer", "Colorful", "NewWorld", "Kraken", "400m",
+        "Thanks", "Mythical", "Tomcat", "AncientTimes", "InThePast", "Ocean",
+        "AtlantisHats", "SecretLuckCode", "Bunny", "ChocolateEgg", "HappyEaster", "LostCity",
+        "UnderTheSea", "Poseidon", "Special", "Update21", "UltraSpeed", "FREE",
+        "ThankYou", "300M", "SpeedyBoi", "StPatricks", "BriteJuice", "SecretCode",
+        "SpeedBoost", "sircfenneriscool", "SuperBeach", "BeachBoost", "superspeed", "Update16",
+        "LuckyDay", "FreeBoost", "SylentlyIsCool", "SuperLuck", "DeeterPlays", "SuperSecret",
+        "SecretBoost", "ExtraLuck", "SecretPet", "pinkarmypet", "FreePet", "MoreCandy",
+        "Candy", "BlueCrew", "Twiisted", "Santa", "Sylently", "Christmas",
+        "CandyCanes", "SuperCoins", "SuperGems", "Spotted", "FreeCoins", "LotsOfGems",
+        "FreeEgg", "TwitterRelease", "Sircfenner", "Tofuu", "ObscureEntity", "Minime",
+        "TwitchRelease", "Golemite"
+    }
+}
+
+local islandRoute = {
+    "The Floating Island",
+    "Space",
+    "The Skylands",
+    "The Void",
+    "Zen",
+    "XP Island"
+}
+
+local chestNames = {
+    "The Floating Island",
+    "The Skylands",
+    "The Void",
+    "Gumdrop Island",
+    "Candy Island",
+    "Sweet Island",
+    "Block Island",
+    "Teddy Island",
+    "Treasure Isle",
+    "Oceanic Island",
+    "Sea Island",
+    "Sea Shell Isle",
+    "Treasure Island",
+    "Water Island",
+    "Sandy Island",
+    "Blue Island",
+    "Red Island",
+    "Purple Island",
+    "Fire Island",
+    "Inferno Island",
+    "Molten Island",
+    "Crystal Island",
+    "Spirit Island",
+    "Magic Island",
+    "Light Island",
+    "Cloud Island",
+    "Demon Island"
+}
+
+local running = true
+
+local function fire(name, ...)
+    local arguments = table.pack(...)
+    local ok = pcall(function()
+        remoteEvent:FireServer(name, table.unpack(arguments, 1, arguments.n))
+    end)
+    task.wait(settings.requestDelay)
+    return ok
+end
+
+local function invoke(name, ...)
+    local arguments = table.pack(...)
+    local ok, result = pcall(function()
+        return remoteFunction:InvokeServer(name, table.unpack(arguments, 1, arguments.n))
+    end)
+    task.wait(settings.requestDelay)
+    if ok then
+        return result
+    end
+end
+
+local function getData()
+    local data = invoke("GetPlayerData")
+    if type(data) == "table" then
+        return data
+    end
+end
+
+local function getRoot()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+local function hasCheckpoint(data, name)
+    local checkpoints = data and data[11]
+    if type(checkpoints) ~= "table" then
+        return false
+    end
+    return table.find(checkpoints, name) ~= nil
+end
+
+local function travelToIsland(name)
+    local overworld = workspace.FloatingIslands:FindFirstChild("Overworld")
+    local island = overworld and overworld:FindFirstChild(name)
+    local destination = island and island:FindFirstChild("TeleportPoint")
+    if not destination or not destination:IsA("BasePart") then
+        return false
+    end
+    local root = getRoot()
+    local entry = destination.CFrame * CFrame.new(0, 20, 0)
+    local landing = destination.CFrame * CFrame.new(0, 3, 0)
+    root.CFrame = entry
+    task.wait(0.35)
+    local tween = TweenService:Create(root, TweenInfo.new(1.25, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+        CFrame = landing
+    })
+    tween:Play()
+    tween.Completed:Wait()
+    task.wait(1.5)
+    return true
+end
+
+local function unlockIslands()
+    for _, name in ipairs(islandRoute) do
+        local data = getData()
+        if not hasCheckpoint(data, name) then
+            travelToIsland(name)
+            task.wait(1)
+        end
+    end
+end
+
+local function tutorialCompleted(data)
+    local tutorial = data and data[137]
+    if type(tutorial) ~= "table" then
+        return false
+    end
+    return tutorial.Completed == true or (tonumber(tutorial.Stage) or 1) > 6
+end
+
+local function completeTutorial()
+    while running do
+        local data = getData()
+        if tutorialCompleted(data) then
+            return true
+        end
+        local tutorial = data and data[137]
+        local stage = type(tutorial) == "table" and tonumber(tutorial.Stage) or 1
+        if stage == 1 or stage == 3 then
+            for _ = 1, 5 do
+                fire("BlowBubble")
+            end
+            fire("SellBubble", "Sell")
+        elseif stage == 2 then
+            fire("BuyShopItem", "EarthFlavors", "Flavors", "Blueberry")
+        elseif stage == 4 then
+            fire("PurchaseEgg", "Common Egg")
+            task.wait(settings.hatchDelay)
+        elseif stage == 5 then
+            fire("BuyShopItem", "EarthGum", "Gum", "Stretchy Gum")
+        elseif stage == 6 then
+            fire("PurchaseEgg", "Spotted Egg")
+            task.wait(settings.hatchDelay)
+        else
+            task.wait(1)
+        end
+        task.wait(0.75)
+    end
+    return false
+end
+
+local function redeemCodes()
+    for _, code in ipairs(settings.codes) do
+        if type(code) == "string" and #code > 0 then
+            invoke("RedeemCode", code)
+        end
+    end
+end
+
+local function equipBestPets()
+    fire("EquipBestPets")
+    task.wait(1)
+end
+
+local function useLevelPotions()
+    local data = getData()
+    local pets = data and data[10]
+    local potions = data and data[64]
+    if type(pets) ~= "table" or type(potions) ~= "table" then
+        return
+    end
+    local equipped = {}
+    for _, pet in ipairs(pets) do
+        if type(pet) == "table" and pet[5] == true and pet[1] then
+            table.insert(equipped, pet[1])
+        end
+    end
+    if #equipped == 0 then
+        return
+    end
+    local petIndex = 1
+    for _, potion in ipairs(potions) do
+        local potionType = type(potion) == "table" and potion[2]
+        if potion[1] and type(potionType) == "string" and potionType:sub(1, 5) == "Level" then
+            fire("UsePotionOnPet", potion[1], equipped[petIndex])
+            petIndex = petIndex % #equipped + 1
+        end
+    end
+end
+
+local function collectChests()
+    for _, name in ipairs(chestNames) do
+        fire("CollectChestReward", name)
+    end
+end
+
+local function skipHatches()
+    while running do
+        local gui = player:FindFirstChildOfClass("PlayerGui")
+        if gui then
+            for _, name in ipairs({ "PetHatch", "MultiPetHatch" }) do
+                local hatch = gui:FindFirstChild(name)
+                local skip = hatch and hatch:FindFirstChild("Skip")
+                if skip and skip:IsA("GuiButton") and skip.Visible and type(firesignal) == "function" then
+                    pcall(firesignal, skip.MouseButton1Down)
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end
+
+local function hatchCommonEgg()
+    local stalled = 0
+    while running and eggsOpened.Value < settings.hatchTarget do
+        local before = eggsOpened.Value
+        fire("PurchaseEgg", "Common Egg")
+        task.wait(settings.hatchDelay)
+        if eggsOpened.Value == before then
+            stalled += 1
+            if stalled >= 3 then
+                break
+            end
+        else
+            stalled = 0
+        end
+    end
+end
+
+player.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+
+task.spawn(skipHatches)
+completeTutorial()
+unlockIslands()
+redeemCodes()
+equipBestPets()
+useLevelPotions()
+collectChests()
+hatchCommonEgg()
+running = false
