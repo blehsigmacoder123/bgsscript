@@ -10,11 +10,11 @@ local remoteEvent = ReplicatedStorage:WaitForChild("NetworkRemoteEvent")
 local remoteFunction = ReplicatedStorage:WaitForChild("NetworkRemoteFunction")
 local leaderstats = player:WaitForChild("leaderstats")
 local eggsOpened = leaderstats:WaitForChild("Eggs Opened")
+local gems = leaderstats:WaitForChild("Gems")
 
 local settings = {
     hatchTarget = 3000,
     requestDelay = 0.45,
-    codeDelay = 1.25,
     hatchDelay = 4.25,
     codes = {
         "BGSISBACK", "Celebration", "Update84", "MechRobot", "CrashFix", "Update82",
@@ -60,6 +60,7 @@ local islandRoute = {
     "The Floating Island",
     "Space",
     "The Skylands",
+    "The Twilight",
     "The Void",
     "Zen",
     "XP Island"
@@ -256,17 +257,6 @@ local function completeTutorial()
     return false
 end
 
-local function redeemCodes()
-    local redeemed = {}
-    for _, code in ipairs(settings.codes) do
-        if type(code) == "string" and #code > 0 and not redeemed[code] then
-            redeemed[code] = true
-            invoke("RedeemCode", code)
-            task.wait(settings.codeDelay)
-        end
-    end
-end
-
 local function equipBestPets()
     fire("EquipBestPets")
     task.wait(1)
@@ -317,6 +307,36 @@ local function collectChests()
     end
 end
 
+local function collectChest(name)
+    fire("CollectChestReward", name)
+end
+
+local function hatchIceShardEgg()
+    if not moveNearEgg("Ice Shard Egg") then
+        return
+    end
+    local stalled = 0
+    while running and gems.Value >= 250 do
+        local before = gems.Value
+        fire("PurchaseEgg", "Ice Shard Egg")
+        task.wait(settings.hatchDelay)
+        if gems.Value >= before then
+            stalled += 1
+            if stalled >= 3 then
+                break
+            end
+        else
+            stalled = 0
+        end
+    end
+end
+
+local function enableCommonEggAutoDelete()
+    for _, pet in ipairs({ "Doggy", "Kitty", "Bunny", "Bear", "King Doggy" }) do
+        fire("AutoDelete", pet, true)
+    end
+end
+
 local function skipHatches()
     while running do
         local gui = player:FindFirstChildOfClass("PlayerGui")
@@ -334,6 +354,9 @@ local function skipHatches()
 end
 
 local function hatchCommonEgg()
+    if not moveNearEgg("Common Egg") then
+        return
+    end
     local stalled = 0
     while running and eggsOpened.Value < settings.hatchTarget do
         local before = eggsOpened.Value
@@ -359,11 +382,12 @@ end)
 
 task.spawn(skipHatches)
 completeTutorial()
-redeemCodes()
 unlockIslands()
-useLevelPotions()
-enchantAllPets()
+collectChest("The Void")
+hatchIceShardEgg()
 equipBestPets()
-collectChests()
+collectChest("XP Island")
+collectChest("The Floating Island")
+enableCommonEggAutoDelete()
 hatchCommonEgg()
 running = false
