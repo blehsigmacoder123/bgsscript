@@ -14,6 +14,7 @@ local eggsOpened = leaderstats:WaitForChild("Eggs Opened")
 local settings = {
     hatchTarget = 3000,
     requestDelay = 0.45,
+    codeDelay = 1.25,
     hatchDelay = 4.25,
     codes = {
         "BGSISBACK", "Celebration", "Update84", "MechRobot", "CrashFix", "Update82",
@@ -136,7 +137,7 @@ local function hasCheckpoint(data, name)
     return table.find(checkpoints, name) ~= nil
 end
 
-local function travelToIsland(name)
+local function travelToIsland(name, attempt)
     local overworld = workspace.FloatingIslands:FindFirstChild("Overworld")
     local island = overworld and overworld:FindFirstChild(name)
     local destination = island and island:FindFirstChild("TeleportPoint")
@@ -144,9 +145,10 @@ local function travelToIsland(name)
         return false
     end
     local root = getRoot()
+    local depth = attempt > 1 and math.min(6 + (attempt - 2) * 4, 30) or 0
     local entry = destination.CFrame * CFrame.new(0, 20, 0)
-    local contact = destination.CFrame
-    local landing = destination.CFrame * CFrame.new(0, 3, 0)
+    local contact = destination.CFrame * CFrame.new(0, -depth, 0)
+    local landing = destination.CFrame * CFrame.new(0, 3 - depth, 0)
     root.CFrame = entry
     task.wait(0.35)
     local tween = TweenService:Create(root, TweenInfo.new(1.25, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
@@ -166,8 +168,10 @@ end
 
 local function unlockIslands()
     for _, name in ipairs(islandRoute) do
+        local attempt = 0
         while running and not hasCheckpoint(getData(), name) do
-            travelToIsland(name)
+            attempt += 1
+            travelToIsland(name, attempt)
             task.wait(1.25)
         end
     end
@@ -253,9 +257,12 @@ local function completeTutorial()
 end
 
 local function redeemCodes()
+    local redeemed = {}
     for _, code in ipairs(settings.codes) do
-        if type(code) == "string" and #code > 0 then
+        if type(code) == "string" and #code > 0 and not redeemed[code] then
+            redeemed[code] = true
             invoke("RedeemCode", code)
+            task.wait(settings.codeDelay)
         end
     end
 end
@@ -352,8 +359,8 @@ end)
 
 task.spawn(skipHatches)
 completeTutorial()
-unlockIslands()
 redeemCodes()
+unlockIslands()
 useLevelPotions()
 enchantAllPets()
 equipBestPets()
