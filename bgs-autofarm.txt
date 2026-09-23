@@ -167,37 +167,77 @@ local function unlockIslands()
     end
 end
 
-local function tutorialCompleted(data)
+local tutorialTracker = {
+    stage = 1,
+    progress = 0,
+    completed = false
+}
+
+local function updateTutorialTracker()
+    local data = getData()
     local tutorial = data and data[137]
-    if type(tutorial) ~= "table" then
+    if type(tutorial) == "table" then
+        tutorialTracker.stage = math.max(1, tonumber(tutorial.Stage) or 1)
+        tutorialTracker.progress = math.max(0, tonumber(tutorial.Progress) or 0)
+        tutorialTracker.completed = tutorial.Completed == true or tutorialTracker.stage > 6
+    end
+    return tutorialTracker
+end
+
+local function moveNearEgg(name)
+    local egg = workspace.Eggs:FindFirstChild(name)
+    local hotkey = egg and egg:FindFirstChild("Hotkey")
+    if not hotkey or not hotkey:IsA("BasePart") then
         return false
     end
-    return tutorial.Completed == true or (tonumber(tutorial.Stage) or 1) > 6
+    local root = getRoot()
+    root.CFrame = hotkey.CFrame * CFrame.new(0, 3, 5)
+    task.wait(0.5)
+    return (root.Position - hotkey.Position).Magnitude <= 12
 end
+
+local tutorialActions = {
+    [1] = function()
+        for _ = 1, 5 do
+            fire("BlowBubble")
+        end
+        fire("SellBubble", "Sell")
+    end,
+    [2] = function()
+        fire("BuyShopItem", "EarthFlavors", "Flavors", "Blueberry")
+    end,
+    [3] = function()
+        for _ = 1, 5 do
+            fire("BlowBubble")
+        end
+        fire("SellBubble", "Sell")
+    end,
+    [4] = function()
+        if moveNearEgg("Common Egg") then
+            fire("PurchaseEgg", "Common Egg")
+            task.wait(settings.hatchDelay)
+        end
+    end,
+    [5] = function()
+        fire("BuyShopItem", "EarthGum", "Gum", "Stretchy Gum")
+    end,
+    [6] = function()
+        if moveNearEgg("Spotted Egg") then
+            fire("PurchaseEgg", "Spotted Egg")
+            task.wait(settings.hatchDelay)
+        end
+    end
+}
 
 local function completeTutorial()
     while running do
-        local data = getData()
-        if tutorialCompleted(data) then
+        local state = updateTutorialTracker()
+        if state.completed then
             return true
         end
-        local tutorial = data and data[137]
-        local stage = type(tutorial) == "table" and tonumber(tutorial.Stage) or 1
-        if stage == 1 or stage == 3 then
-            for _ = 1, 5 do
-                fire("BlowBubble")
-            end
-            fire("SellBubble", "Sell")
-        elseif stage == 2 then
-            fire("BuyShopItem", "EarthFlavors", "Flavors", "Blueberry")
-        elseif stage == 4 then
-            fire("PurchaseEgg", "Common Egg")
-            task.wait(settings.hatchDelay)
-        elseif stage == 5 then
-            fire("BuyShopItem", "EarthGum", "Gum", "Stretchy Gum")
-        elseif stage == 6 then
-            fire("PurchaseEgg", "Spotted Egg")
-            task.wait(settings.hatchDelay)
+        local action = tutorialActions[state.stage]
+        if action then
+            action()
         else
             task.wait(1)
         end
