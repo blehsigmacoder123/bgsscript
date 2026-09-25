@@ -15,7 +15,7 @@ local gems = leaderstats:WaitForChild("Gems")
 local settings = {
     hatchTarget = 3000,
     requestDelay = 0.45,
-    hatchDelay = 4.25,
+    hatchDelay = 0.65,
     codes = {
         "BGSISBACK", "Celebration", "Update84", "MechRobot", "CrashFix", "Update82",
         "AlienInvasion", "MythicFallenAngel", "Update81", "SorryShutdown", "PermMythic", "20HourLuck",
@@ -307,8 +307,69 @@ local function collectChests()
     end
 end
 
+local function isChestOnCooldown(name)
+    local data = getData()
+    local regenTimes = data and data[12]
+    local regenTime = type(regenTimes) == "table" and regenTimes[name]
+    return type(regenTime) == "number" and regenTime > os.time()
+end
+
+local function getChestClaimPart(name)
+    local chest
+    for _, world in ipairs(workspace.FloatingIslands:GetChildren()) do
+        local island = world:FindFirstChild(name)
+        if island then
+            chest = island:FindFirstChild("Chest")
+            if chest then
+                break
+            end
+        end
+    end
+    local claim = chest and chest:FindFirstChild("Chest Collect " .. name)
+    if not claim then
+        return
+    end
+    if claim:IsA("BasePart") then
+        return claim
+    end
+    if claim:IsA("Attachment") then
+        return claim.Parent and claim.Parent:IsA("BasePart") and claim.Parent or nil
+    end
+    if claim:IsA("Model") then
+        return claim.PrimaryPart or claim:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return claim.Parent and claim.Parent:IsA("BasePart") and claim.Parent or nil
+end
+
+local function moveToChestClaim(name, attempt)
+    local target = getChestClaimPart(name)
+    if not target then
+        return false
+    end
+    local root = getRoot()
+    local offset = 3 - math.min((attempt - 1) * 2, 6)
+    root.CFrame = target.CFrame * CFrame.new(0, offset, 0)
+    task.wait(0.5)
+    if type(firetouchinterest) == "function" then
+        pcall(firetouchinterest, root, target, 0)
+        pcall(firetouchinterest, root, target, 1)
+    end
+    return true
+end
+
 local function collectChest(name)
-    fire("CollectChestReward", name)
+    if isChestOnCooldown(name) then
+        return true
+    end
+    for attempt = 1, 4 do
+        moveToChestClaim(name, attempt)
+        fire("CollectChestReward", name)
+        task.wait(0.75)
+        if isChestOnCooldown(name) then
+            return true
+        end
+    end
+    return false
 end
 
 local function hatchIceShardEgg()
@@ -340,16 +401,24 @@ end
 local function skipHatches()
     while running do
         local gui = player:FindFirstChildOfClass("PlayerGui")
-        if gui then
+        local screenGui = gui and gui:FindFirstChild("ScreenGui")
+        if screenGui then
             for _, name in ipairs({ "PetHatch", "MultiPetHatch" }) do
-                local hatch = gui:FindFirstChild(name)
+                local hatch = screenGui:FindFirstChild(name)
                 local skip = hatch and hatch:FindFirstChild("Skip")
-                if skip and skip:IsA("GuiButton") and skip.Visible and type(firesignal) == "function" then
-                    pcall(firesignal, skip.MouseButton1Down)
+                if skip and skip:IsA("GuiButton") and skip.Visible then
+                    if type(firesignal) == "function" then
+                        pcall(firesignal, skip.MouseButton1Down)
+                    end
+                    if type(getconnections) == "function" then
+                        for _, connection in ipairs(getconnections(skip.MouseButton1Down)) do
+                            pcall(connection.Function)
+                        end
+                    end
                 end
             end
         end
-        task.wait(0.1)
+        task.wait(0.03)
     end
 end
 
