@@ -15,45 +15,9 @@ local gems = leaderstats:WaitForChild("Gems")
 local settings = {
     hatchTarget = 3000,
     requestDelay = 0.45,
-    hatchDelay = 0.65,
-    codes = {
-        "BGSISBACK", "Celebration", "Update84", "MechRobot", "CrashFix", "Update82",
-        "AlienInvasion", "MythicFallenAngel", "Update81", "SorryShutdown", "PermMythic", "20HourLuck",
-        "Update78", "FrostPortal", "SuperSpooky", "Update77", "Glitch", "Update75",
-        "Easter21", "Update74", "Luckiest", "Update73", "StPatrickLuck", "Update72",
-        "BlizzyrdBest", "SylentlyBest", "hiddenvideocode", "Update71", "Valentine", "LuckyCode",
-        "RumbleStream", "BlizzyWizzy", "BGSStream", "Update70", "Royalty", "Update68",
-        "2020", "SANTACLAUS", "CHRISTMASSTREAM", "SUPERBOOST", "JollyChristmas2", "JollyChristmas",
-        "ChristmasPart2", "Update67", "Christmas2020", "EpicSecretCode", "BGSXMAS", "Jonathan",
-        "KingSlimeGang", "KingMushGang", "ChristmasHype", "HappyHolidays", "RUDOLPH", "MILKANDCOOKIES",
-        "StreamLuck", "CANDYCANE", "StreamSpeed", "ShinyStream", "MythicStream", "SecretVideoCode",
-        "Update65", "Split", "SylentlyOP", "FreeSpeedBoost", "YouTubeLuck", "BlizzyrdOP",
-        "SuperSecretCode", "YouTubeSpeed", "SpookyCode", "300k", "Youtube", "Ghosts",
-        "Update64", "Costume", "Update63", "FreeDominusPet", "SpookyHalloween", "AutumnSale",
-        "AutumnSale2", "Update61", "Autumn", "Update60", "Citrus", "Update59",
-        "Vacation", "Update58", "Carnival2", "Update57", "Carnival", "MegaLuckBoost",
-        "MegaSpeedBoost", "Update55", "SuperSale", "Update54", "Shadow", "Update53",
-        "Meteor", "Update52", "Vine", "Update51", "Spring", "Update50",
-        "Mythic", "Update49", "Merchant", "Update48", "Season 8", "Update47",
-        "Eeaster2020", "Update46", "Mushroom", "Update45", "Mystic", "Season7",
-        "NewEgg", "Challenges", "Galactic", "Portal", "LuckyDay2", "FreeSpeed",
-        "MegaSale", "600M", "600MBoost", "Valentines", "Cupid", "sircfennerNoob",
-        "Part2", "Clown", "Circus", "ChristmasBoost", "HammieIsBadAtRocketLeague", "FreeHatchSpeed",
-        "Season3", "Halloween", "TrickOrTreat", "Pass", "Secrets", "BubblePass",
-        "Fancy", "Fancy2", "ReallyFancy", "2hourluck", "July4th", "UncleSam",
-        "Fireworks", "Summer", "Colorful", "NewWorld", "Kraken", "400m",
-        "Thanks", "Mythical", "Tomcat", "AncientTimes", "InThePast", "Ocean",
-        "AtlantisHats", "SecretLuckCode", "Bunny", "ChocolateEgg", "HappyEaster", "LostCity",
-        "UnderTheSea", "Poseidon", "Special", "Update21", "UltraSpeed", "FREE",
-        "ThankYou", "300M", "SpeedyBoi", "StPatricks", "BriteJuice", "SecretCode",
-        "SpeedBoost", "sircfenneriscool", "SuperBeach", "BeachBoost", "superspeed", "Update16",
-        "LuckyDay", "FreeBoost", "SylentlyIsCool", "SuperLuck", "DeeterPlays", "SuperSecret",
-        "SecretBoost", "ExtraLuck", "SecretPet", "pinkarmypet", "FreePet", "MoreCandy",
-        "Candy", "BlueCrew", "Twiisted", "Santa", "Sylently", "Christmas",
-        "CandyCanes", "SuperCoins", "SuperGems", "Spotted", "FreeCoins", "LotsOfGems",
-        "FreeEgg", "TwitterRelease", "Sircfenner", "Tofuu", "ObscureEntity", "Minime",
-        "TwitchRelease", "Golemite"
-    }
+    hatchRequestDelay = 0.12,
+    hatchDelay = 0.12,
+    autoDeleteRefresh = 1.5
 }
 
 local islandRoute = {
@@ -66,36 +30,6 @@ local islandRoute = {
     "XP Island"
 }
 
-local chestNames = {
-    "The Floating Island",
-    "The Skylands",
-    "The Void",
-    "Gumdrop Island",
-    "Candy Island",
-    "Sweet Island",
-    "Block Island",
-    "Teddy Island",
-    "Treasure Isle",
-    "Oceanic Island",
-    "Sea Island",
-    "Sea Shell Isle",
-    "Treasure Island",
-    "Water Island",
-    "Sandy Island",
-    "Blue Island",
-    "Red Island",
-    "Purple Island",
-    "Fire Island",
-    "Inferno Island",
-    "Molten Island",
-    "Crystal Island",
-    "Spirit Island",
-    "Magic Island",
-    "Light Island",
-    "Cloud Island",
-    "Demon Island"
-}
-
 local running = true
 
 local function fire(name, ...)
@@ -104,6 +38,14 @@ local function fire(name, ...)
         remoteEvent:FireServer(name, table.unpack(arguments, 1, arguments.n))
     end)
     task.wait(settings.requestDelay)
+    return ok
+end
+
+local function purchaseEgg(name)
+    local ok = pcall(function()
+        remoteEvent:FireServer("PurchaseEgg", name)
+    end)
+    task.wait(settings.hatchRequestDelay)
     return ok
 end
 
@@ -301,12 +243,6 @@ local function enchantAllPets()
     end
 end
 
-local function collectChests()
-    for _, name in ipairs(chestNames) do
-        fire("CollectChestReward", name)
-    end
-end
-
 local function isChestOnCooldown(name)
     local data = getData()
     local regenTimes = data and data[12]
@@ -373,28 +309,25 @@ local function collectChest(name)
 end
 
 local function hatchIceShardEgg()
-    if not moveNearEgg("Ice Shard Egg") then
-        return
-    end
-    local stalled = 0
+    local attempts = 0
     while running and gems.Value >= 250 do
-        local before = gems.Value
-        fire("PurchaseEgg", "Ice Shard Egg")
-        task.wait(settings.hatchDelay)
-        if gems.Value >= before then
-            stalled += 1
-            if stalled >= 3 then
-                break
-            end
-        else
-            stalled = 0
+        attempts += 1
+        if attempts == 1 or attempts % 12 == 0 then
+            moveNearEgg("Ice Shard Egg")
         end
+        purchaseEgg("Ice Shard Egg")
+        task.wait(settings.hatchDelay)
     end
 end
 
+local commonEggPets = { "Doggy", "Kitty", "Bunny", "Bear", "King Doggy" }
+
 local function enableCommonEggAutoDelete()
-    for _, pet in ipairs({ "Doggy", "Kitty", "Bunny", "Bear", "King Doggy" }) do
-        fire("AutoDelete", pet, true)
+    for _, pet in ipairs(commonEggPets) do
+        pcall(function()
+            remoteEvent:FireServer("AutoDelete", pet, true)
+        end)
+        task.wait(0.08)
     end
 end
 
@@ -405,13 +338,21 @@ local function skipHatches()
         if screenGui then
             for _, name in ipairs({ "PetHatch", "MultiPetHatch" }) do
                 local hatch = screenGui:FindFirstChild(name)
-                local skip = hatch and hatch:FindFirstChild("Skip")
+                local skip = hatch and hatch:FindFirstChild("Skip", true)
                 if skip and skip:IsA("GuiButton") and skip.Visible then
+                    pcall(function()
+                        skip:Activate()
+                    end)
                     if type(firesignal) == "function" then
                         pcall(firesignal, skip.MouseButton1Down)
+                        pcall(firesignal, skip.MouseButton1Click)
+                        pcall(firesignal, skip.Activated)
                     end
                     if type(getconnections) == "function" then
                         for _, connection in ipairs(getconnections(skip.MouseButton1Down)) do
+                            pcall(connection.Function)
+                        end
+                        for _, connection in ipairs(getconnections(skip.MouseButton1Click)) do
                             pcall(connection.Function)
                         end
                     end
@@ -426,19 +367,15 @@ local function hatchCommonEgg()
     if not moveNearEgg("Common Egg") then
         return
     end
-    local stalled = 0
-    while running and eggsOpened.Value < settings.hatchTarget do
-        local before = eggsOpened.Value
-        fire("PurchaseEgg", "Common Egg")
-        task.wait(settings.hatchDelay)
-        if eggsOpened.Value == before then
-            stalled += 1
-            if stalled >= 3 then
-                break
-            end
-        else
-            stalled = 0
+    task.spawn(function()
+        while running and eggsOpened.Value < settings.hatchTarget do
+            enableCommonEggAutoDelete()
+            task.wait(settings.autoDeleteRefresh)
         end
+    end)
+    while running and eggsOpened.Value < settings.hatchTarget do
+        purchaseEgg("Common Egg")
+        task.wait(settings.hatchDelay)
     end
 end
 
