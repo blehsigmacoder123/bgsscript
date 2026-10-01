@@ -1,5 +1,5 @@
 local CONFIG = {
-    PetName = "Ancient Immortal One",
+    PetName = "Carnival Ferris Wheel",
     Webhook = (getgenv and getgenv() or _G).ASSET_EXPORT_WEBHOOK or "",
     LoadTimeout = 60,
     ExportTimeout = 120,
@@ -413,7 +413,7 @@ local function upload(zip, filename)
     local boundary = "PetExport" .. HttpService:GenerateGUID(false):gsub("%-", "")
     while zip:find(boundary, 1, true) do boundary = boundary .. "x" end
     local payload = HttpService:JSONEncode({
-        content = "Ancient Immortal One export: Roblox XML, decal IDs, asset references and animation data.",
+        content = "Carnival Ferris Wheel export: Roblox XML, decal IDs, asset references and animation data.",
         allowed_mentions = {parse = {}},
         attachments = {{id = 0, filename = filename, description = "Roblox-importable pet model ZIP"}},
     })
@@ -1421,7 +1421,7 @@ local function bundleAssets(root, snapshot)
     return files
 end
 
-local README = [[Ancient Immortal One - model and asset-reference export
+local README = [[Carnival Ferris Wheel - model and asset-reference export
 
 Upload this ZIP to the localhost model viewer.
 assetids.json records decal IDs, parent transforms, face normals, dimensions, local corners,
@@ -1460,7 +1460,7 @@ local function run()
         "WEBHOOK_FORMAT: set getgenv().ASSET_EXPORT_WEBHOOK to a clean Discord webhook URL before loading.")
     initializeCRC()
     requireThat(crc32("123456789") == 0xCBF43926, "ZIP_SELF_TEST: CRC32 reference vector failed.")
-    outputPrefix = "Ancient_Immortal_One_" .. HttpService:GenerateGUID(false):gsub("%-", "")
+    outputPrefix = "Carnival_Ferris_Wheel_" .. HttpService:GenerateGUID(false):gsub("%-", "")
 
     step("02 LOAD", "Waiting for game and local player, with a bounded timeout.")
     waitUntil(function() return game:IsLoaded() end, CONFIG.LoadTimeout, "GAME_TIMEOUT: game did not load.")
@@ -1551,7 +1551,7 @@ local function run()
     step("07 ZIP", "Building ZIP with model XML, decal IDs, asset references and animation data.")
     local manifest = HttpService:JSONEncode(snapshot)
     local files = {
-        {name = "Ancient_Immortal_One.rbxmx", data = xml},
+        {name = "Carnival_Ferris_Wheel.rbxmx", data = xml},
         {name = "manifest.json", data = manifest},
         {name = "README.txt", data = README},
         {name = "LICENSE_USSI.txt", data = USSI_LICENSE},
@@ -1565,7 +1565,7 @@ local function run()
     saveZipBackup(zip, zipPath)
 
     step("08 UPLOAD", "Uploading ZIP as a binary multipart Discord attachment.")
-    upload(zip, "Ancient_Immortal_One.zip")
+    upload(zip, "Carnival_Ferris_Wheel.zip")
     step("09 DONE", "Discord confirmed ZIP receipt." ..
         (backupPath and (" Verified local backup: " .. backupPath) or " Uploaded from memory; no verified local ZIP backup."))
 end
@@ -1581,7 +1581,7 @@ if not abandoned then
     if ownsLock then environment.ASSET_EXPORT_RUNNING = nil end
 end
 if type(writefile) == "function" then
-    local logPath = (outputPrefix or "Ancient_Immortal_One_failed") .. ".log"
+    local logPath = (outputPrefix or "Carnival_Ferris_Wheel_failed") .. ".log"
     local saved, err = pcall(writefile, logPath, table.concat(lines, "\n") .. "\n")
     if saved then log("INFO", "Complete console log saved: " .. logPath)
     else log("WARN", "Cannot save log: " .. redact(err)) end
