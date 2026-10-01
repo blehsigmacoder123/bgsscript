@@ -1216,6 +1216,48 @@ local function exportAnimations(root)
     return result
 end
 
+local function decalPlacements(root)
+    local result = {}
+    local directions = {{1,0,0},{0,1,0},{0,0,1},{-1,0,0},{0,-1,0},{0,0,-1}}
+    for _, decal in ipairs(root:GetDescendants()) do
+        if decal:IsA("Decal") and decal.Parent and decal.Parent:IsA("BasePart") then
+            local parent = decal.Parent
+            local size = {parent.Size.X, parent.Size.Y, parent.Size.Z}
+            local normal = directions[decal.Face.Value + 1]
+            local up = math.abs(normal[2]) == 1 and {0,0,-normal[2]} or {0,1,0}
+            local right = {up[2]*normal[3]-up[3]*normal[2], up[3]*normal[1]-up[1]*normal[3], up[1]*normal[2]-up[2]*normal[1]}
+            local center, width, height = {}, 0, 0
+            for i = 1, 3 do
+                center[i] = normal[i]*size[i]/2
+                width = width + math.abs(right[i])*size[i]
+                height = height + math.abs(up[i])*size[i]
+            end
+            local corners = {}
+            for _, sign in ipairs({{-1,-1},{1,-1},{1,1},{-1,1}}) do
+                local point = {}
+                for i = 1, 3 do point[i] = center[i]+right[i]*width/2*sign[1]+up[i]*height/2*sign[2] end
+                table.insert(corners, point)
+            end
+            local item = {id = assetID(decal.Texture), name = decal.Name, path = decal:GetFullName(),
+                parentPath = parent:GetFullName(), parentName = parent.Name, parentClass = parent.ClassName,
+                parentSize = size, parentCFrame = cframeArray(parent.CFrame), face = decal.Face.Name,
+                faceValue = decal.Face.Value, localNormal = normal, localUp = up, localRight = right,
+                faceArea = {width = width, height = height, localCenter = center, localCorners = corners},
+                tint = {decal.Color3.R,decal.Color3.G,decal.Color3.B}, transparency = decal.Transparency}
+            for _, property in ipairs({"ZIndex", "Rotation"}) do
+                local ok, value = pcall(function() return decal[property] end)
+                if ok then item[property] = value end
+            end
+            for _, property in ipairs({"UVOffset", "UVScale"}) do
+                local ok, value = pcall(function() return decal[property] end)
+                if ok and value then item[property] = {value.X,value.Y} end
+            end
+            table.insert(result, item)
+        end
+    end
+    return result
+end
+
 local function bundleAssets(root, snapshot)
     step("06B ASSET REFERENCES", "Recording asset IDs for the localhost backend; no mesh/image downloads in Delta.")
     local entries, byKey, decalIDs, seenDecals = {}, {}, {}, {}
@@ -1241,7 +1283,7 @@ local function bundleAssets(root, snapshot)
     snapshot.offlineAssets = {schema = "pet-assets-v1", entries = entries, complete = false, totalBytes = 0}
     snapshot.assetResolution = {mode = "localhost-backend", exporterDownloadsAssets = false}
     local references = {schema = "pet-asset-references-v1", petName = CONFIG.PetName,
-        placeId = game.PlaceId, universeId = game.GameId, decalIds = decalIDs, assets = entries}
+        placeId = game.PlaceId, universeId = game.GameId, decalIds = decalIDs, decals = decalPlacements(root), assets = entries}
     log("INFO", #entries .. " unique asset references; " .. #decalIDs .. " decal image IDs recorded.")
     for _, id in ipairs(decalIDs) do log("INFO", "Face/decal asset ID: " .. id) end
     step("06C ANIMATIONS", "Capturing available keyframes and pet motion metadata.")
@@ -1257,7 +1299,9 @@ end
 local README = [[Ancient Immortal One - model and asset-reference export
 
 Upload this ZIP to the localhost model viewer.
-assetids.json records the decal IDs and all typed asset references for backend resolution.
+assetids.json records decal IDs, parent transforms, face normals, dimensions, local corners,
+tint, UV transforms and layers. XML remains the source of instance placement.
+The backend resolves decal thumbnail previews in POST batches of up to 100 IDs.
 No mesh or image downloads are attempted in Delta, and 401 errors from asset delivery
 cannot block this export. Referenced images are resolved by the localhost backend.
 The archive itself contains XML, IDs and available animation data, not image/mesh binaries.
