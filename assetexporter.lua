@@ -1265,7 +1265,7 @@ local function copyRenderMeshes(root, snapshot)
     local files, seen, failures, total = {}, {}, {}, 0
     local service = game:GetService("AssetService")
     for _, part in ipairs(root:GetDescendants()) do
-        if part:IsA("MeshPart") then
+        if part:IsA("MeshPart") or (part:IsA("SpecialMesh") and part.MeshType == Enum.MeshType.FileMesh) then
             local id = assetID(part.MeshId)
             if id and not seen[id] then
                 seen[id] = true
@@ -1273,7 +1273,8 @@ local function copyRenderMeshes(root, snapshot)
                 local ok, failure = pcall(function()
                     requireThat(buffer and type(buffer.create) == "function", "MESH_COPY: buffer API unavailable.")
                     editable = boundedCall("MESH_COPY", CONFIG.MeshCopyTimeout, function()
-                        local result = service:CreateEditableMeshAsync(part.MeshContent, {FixedSize = true})
+                        local content = part:IsA("MeshPart") and part.MeshContent or Content.fromUri(part.MeshId)
+                        local result = service:CreateEditableMeshAsync(content, {FixedSize = true})
                         return result
                     end)
                     requireThat(editable, "MESH_COPY: engine returned no editable mesh (memory or permissions).")
@@ -1332,6 +1333,7 @@ local function copyRenderMeshes(root, snapshot)
             end
         end
     end
+    requireThat(#failures == 0, "RENDER_MESH_INCOMPLETE: " .. #failures .. " render meshes unavailable. MeshPart and SpecialMesh geometry are both required; no box substitute will be uploaded. See ORIGINAL_MESH_UNAVAILABLE above.")
     snapshot.renderMeshCopy = {copied = #files, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh", preservesNormals = true, preservesUVs = true}
     snapshot.embeddedAssetBinaries = #files > 0
     return files
