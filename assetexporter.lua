@@ -1337,9 +1337,21 @@ local function copyRenderMeshes(root, snapshot)
     return files
 end
 
-local function captureRendering()
+local function captureRendering(root)
     local lighting = game:GetService("Lighting")
-    local result = {schema = "pet-rendering-v1", lighting = {}, effects = {}}
+    local result = {schema = "pet-rendering-v1", lighting = {}, effects = {}, parts = {}, colorSource = "storage-model-clone"}
+    local function captureParts(node, parentPath)
+        local path = table.clone(parentPath)
+        table.insert(path, node.Name)
+        if node:IsA("BasePart") then
+            local value = node.Color
+            table.insert(result.parts, {path = path, class = node.ClassName,
+                color = {value.R, value.G, value.B}})
+        end
+        for _, child in ipairs(node:GetChildren()) do captureParts(child, path) end
+        task.wait()
+    end
+    captureParts(root, {})
     local function properties(instance, names)
         local values = {}
         for _, name in ipairs(names) do
@@ -1364,7 +1376,7 @@ local function captureRendering()
     end
     effects(lighting)
     effects(workspace.CurrentCamera)
-    log("INFO", "Lighting exposure and " .. #result.effects .. " bloom/color effects recorded; Neon material properties remain in the model XML.")
+    log("INFO", #result.parts .. " direct storage-model colors, lighting exposure and " .. #result.effects .. " bloom/color effects recorded.")
     return result
 end
 
@@ -1403,7 +1415,7 @@ local function bundleAssets(root, snapshot)
     local files = {
         {name = "assetids.json", data = HttpService:JSONEncode(references)},
         {name = "animations.json", data = HttpService:JSONEncode(animations)},
-        {name = "rendering.json", data = HttpService:JSONEncode(captureRendering())},
+        {name = "rendering.json", data = HttpService:JSONEncode(captureRendering(root))},
     }
     for _, file in ipairs(copyRenderMeshes(root, snapshot)) do table.insert(files, file) end
     return files
