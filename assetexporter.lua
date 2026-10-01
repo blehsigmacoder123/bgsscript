@@ -1498,11 +1498,54 @@ local function run()
     log("INFO", "Anti-AFK connected for this export; disconnects on completion/failure.")
 
     step("03 LOCATE", 'Resolving ReplicatedStorage.Assets.Pets.Normal["' .. CONFIG.PetName .. '"].')
-    local target = game:GetService("ReplicatedStorage")
-    for _, name in ipairs({"Assets", "Pets", "Normal", CONFIG.PetName}) do
-        local nextTarget = target:FindFirstChild(name) or target:WaitForChild(name, CONFIG.LoadTimeout)
-        requireThat(nextTarget, "TARGET_MISSING: '" .. name .. "' under " .. target:GetFullName())
-        target = nextTarget
+    local replicatedStorage = game:GetService("ReplicatedStorage")
+    local folder = replicatedStorage
+    for _, name in ipairs({"Assets", "Pets", "Normal"}) do
+        local nextFolder = folder:FindFirstChild(name) or folder:WaitForChild(name, CONFIG.LoadTimeout)
+        requireThat(nextFolder, "TARGET_FOLDER_MISSING: '" .. name .. "' under " .. folder:GetFullName())
+        folder = nextFolder
+    end
+    local target = folder:FindFirstChild(CONFIG.PetName)
+    if not target then
+        step("03A REQUEST MODEL", "Pet is not cached; requesting Godly Gem Mythic through Shared.Utils.GetPetModel.")
+        local shared = replicatedStorage:FindFirstChild("Shared")
+        local utils = shared and shared:FindFirstChild("Utils")
+        local module = utils and utils:FindFirstChild("GetPetModel")
+        requireThat(module and module:IsA("ModuleScript"),
+            "MODEL_LOADER_MISSING: Shared.Utils.GetPetModel is unavailable in this game build.")
+        local complete, returned, requestFailure = false, nil, nil
+        local requestTask = task.spawn(function()
+            local succeeded, value = pcall(function()
+                local getPetModel = require(module)
+                requireThat(type(getPetModel) == "function", "MODEL_LOADER_FORMAT: expected a function.")
+                return getPetModel({Name = "Godly Gem", Mythic = true, Shiny = false})
+            end)
+            if succeeded then returned = value else requestFailure = redact(value) end
+            complete = true
+        end)
+        local deadline, nextHeartbeat = os.clock() + CONFIG.LoadTimeout, os.clock() + 5
+        while not complete and os.clock() < deadline do
+            if os.clock() >= nextHeartbeat then
+                local cached = folder:FindFirstChild(CONFIG.PetName)
+                log("INFO", cached and "Target received; waiting for the game loader to finish tree validation/preload."
+                    or "Waiting for live-server model transfer: Normal/Godly Gem Mythic.")
+                nextHeartbeat = os.clock() + 5
+            end
+            task.wait(0.2)
+        end
+        if not complete then
+            pcall(task.cancel, requestTask)
+            error("MODEL_REQUEST_TIMEOUT: game loader did not finish within " .. CONFIG.LoadTimeout ..
+                " seconds. Run in the live game; the decompile cannot supply missing models. Nothing uploaded.", 0)
+        end
+        requireThat(not requestFailure, "MODEL_REQUEST_FAILED: " .. tostring(requestFailure))
+        target = folder:FindFirstChild(CONFIG.PetName)
+        requireThat(target and target:IsA("Model") and returned == target,
+            "MODEL_REQUEST_REJECTED: exact Godly Gem Mythic model was not delivered. " ..
+            "The loader returned " .. (typeof(returned) == "Instance" and returned.Name or typeof(returned)) ..
+            "; Doggy/fallback models are never exported. Nothing uploaded.")
+        log("INFO", "Live-server transfer completed; exact Godly Gem Mythic model cached and ready.")
+        step("03 LOCATE", "Inspecting the delivered pet model.")
     end
     requireThat(target:IsA("Model"), "TARGET_CLASS: expected Model, got " .. target.ClassName)
     local source = inventory(target)
