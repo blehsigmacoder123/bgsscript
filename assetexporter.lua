@@ -13,7 +13,7 @@ local CONFIG = {
     MaxRetryWait = 60,
     AssetTimeout = 35,
     MeshCopyTimeout = 12,
-    MaxSurfaceBytes = 5 * 1024 * 1024,
+    MaxSurfaceBytes = 7 * 1024 * 1024,
 }
 
 local started = os.clock()
@@ -1280,15 +1280,12 @@ local function copyRenderMeshes(root, snapshot)
                     requireThat(editable, "MESH_COPY: engine returned no editable mesh (memory or permissions).")
                     local faces = editable:GetFaces()
                     requireThat(#faces > 0, "MESH_COPY: empty render surface.")
-                    local bytes = 37 + #faces * (3 * 40 + 12)
-                    requireThat(bytes + total <= CONFIG.MaxSurfaceBytes, "MESH_COPY_BUDGET: original surfaces exceed configured archive budget.")
-                    local data = buffer.create(bytes)
-                    buffer.writestring(data, 0, "version 4.00\n")
-                    buffer.writeu16(data, 13, 24)
-                    buffer.writeu32(data, 17, #faces * 3)
-                    buffer.writeu32(data, 21, #faces)
-                    local indexOffset = 37 + #faces * 3 * 40
-                    local vertex = 0
+                    local indexBytes = #faces * 12
+                    requireThat(37 + indexBytes + total <= CONFIG.MaxSurfaceBytes, "MESH_COPY_BUDGET: triangle indices exceed configured archive budget.")
+                    local indices = buffer.create(indexBytes)
+                    local scratch = buffer.create(40)
+                    local vertexData, byVertex = {}, {}
+                    local vertexCount = 0
                     for faceIndex, face in ipairs(faces) do
                         local vertices = editable:GetFaceVertices(face)
                         local normals = editable:GetFaceNormals(face)
@@ -1299,27 +1296,43 @@ local function copyRenderMeshes(root, snapshot)
                             local position = editable:GetPosition(vertices[corner])
                             local normal = editable:GetNormal(normals[corner])
                             local uv = editable:GetUV(uvs[corner])
-                            local offset = 37 + vertex * 40
                             for axis, value in ipairs({position.X,position.Y,position.Z,normal.X,normal.Y,normal.Z,uv.X,uv.Y}) do
                                 requireThat(value == value and math.abs(value) < 1e10, "MESH_COPY: invalid numeric vertex data.")
-                                buffer.writef32(data, offset + (axis-1)*4, value)
+                                buffer.writef32(scratch, (axis-1)*4, value)
                             end
-                            for channel = 36, 39 do buffer.writeu8(data, offset + channel, 255) end
+                            for channel = 36, 39 do buffer.writeu8(scratch, channel, 255) end
                             if colorsOK and colors and colors[corner] then
                                 local color = editable:GetColor(colors[corner])
                                 local alpha = editable:GetColorAlpha(colors[corner]) or 1
                                 for channel, value in ipairs({color.R,color.G,color.B,alpha}) do
-                                    buffer.writeu8(data, offset + 35 + channel, math.floor(math.clamp(value,0,1)*255+.5))
+                                    buffer.writeu8(scratch, 35 + channel, math.floor(math.clamp(value,0,1)*255+.5))
                                 end
                             end
-                            buffer.writeu32(data, indexOffset + ((faceIndex-1)*3+corner-1)*4, vertex)
-                            vertex = vertex + 1
+                            local encoded = buffer.tostring(scratch)
+                            local index = byVertex[encoded]
+                            if index == nil then
+                                requireThat(37 + indexBytes + (vertexCount+1)*40 + total <= CONFIG.MaxSurfaceBytes,
+                                    "MESH_COPY_BUDGET: indexed original surfaces exceed configured archive budget.")
+                                index = vertexCount
+                                vertexCount = vertexCount + 1
+                                byVertex[encoded] = index
+                                table.insert(vertexData, encoded)
+                            end
+                            buffer.writeu32(indices, ((faceIndex-1)*3+corner-1)*4, index)
                         end
                         if faceIndex % 100 == 0 then task.wait() end
                     end
-                    table.insert(files, {name = "assets/meshes/" .. id .. ".mesh", data = buffer.tostring(data)})
+                    local bytes = 37 + vertexCount*40 + indexBytes
+                    local header = buffer.create(37)
+                    buffer.writestring(header, 0, "version 4.00\n")
+                    buffer.writeu16(header, 13, 24)
+                    buffer.writeu32(header, 17, vertexCount)
+                    buffer.writeu32(header, 21, #faces)
+                    local data = buffer.tostring(header) .. table.concat(vertexData) .. buffer.tostring(indices)
+                    byVertex, vertexData = nil, nil
+                    table.insert(files, {name = "assets/meshes/" .. id .. ".mesh", data = data})
                     total = total + bytes
-                    log("INFO", "Original mesh copied: " .. id .. "; " .. #faces .. " triangles, normals + UVs; " .. bytes .. " bytes.")
+                    log("INFO", "Original mesh copied: " .. id .. "; " .. #faces .. " triangles, " .. vertexCount .. " unique vertices, normals + UVs; " .. bytes .. " bytes (" .. string.format("%.1f", 100*(1-bytes/(37+#faces*132))) .. "% smaller).")
                 end)
                 if editable then pcall(function() editable:Destroy() end) end
                 if not ok then
@@ -1334,7 +1347,7 @@ local function copyRenderMeshes(root, snapshot)
         end
     end
     requireThat(#failures == 0, "RENDER_MESH_INCOMPLETE: " .. #failures .. " render meshes unavailable. MeshPart and SpecialMesh geometry are both required; no box substitute will be uploaded. See ORIGINAL_MESH_UNAVAILABLE above.")
-    snapshot.renderMeshCopy = {copied = #files, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh", preservesNormals = true, preservesUVs = true}
+    snapshot.renderMeshCopy = {copied = #files, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh-indexed", preservesNormals = true, preservesUVs = true}
     snapshot.embeddedAssetBinaries = #files > 0
     return files
 end
