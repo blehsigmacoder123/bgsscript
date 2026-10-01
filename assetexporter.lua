@@ -1337,6 +1337,37 @@ local function copyRenderMeshes(root, snapshot)
     return files
 end
 
+local function captureRendering()
+    local lighting = game:GetService("Lighting")
+    local result = {schema = "pet-rendering-v1", lighting = {}, effects = {}}
+    local function properties(instance, names)
+        local values = {}
+        for _, name in ipairs(names) do
+            local ok, value = pcall(function() return instance[name] end)
+            if ok then
+                if typeof(value) == "Color3" then values[name] = {value.R,value.G,value.B}
+                elseif type(value) == "number" or type(value) == "boolean" then values[name] = value end
+            end
+        end
+        return values
+    end
+    result.lighting = properties(lighting, {"Brightness", "ExposureCompensation", "Ambient", "OutdoorAmbient", "EnvironmentDiffuseScale", "EnvironmentSpecularScale", "ColorShift_Top", "ColorShift_Bottom"})
+    local function effects(parent)
+        if not parent then return end
+        for _, effect in ipairs(parent:GetChildren()) do
+            if effect:IsA("BloomEffect") then
+                table.insert(result.effects, {class = effect.ClassName, values = properties(effect, {"Enabled", "Intensity", "Size", "Threshold"})})
+            elseif effect:IsA("ColorCorrectionEffect") then
+                table.insert(result.effects, {class = effect.ClassName, values = properties(effect, {"Enabled", "Brightness", "Contrast", "Saturation", "TintColor"})})
+            end
+        end
+    end
+    effects(lighting)
+    effects(workspace.CurrentCamera)
+    log("INFO", "Lighting exposure and " .. #result.effects .. " bloom/color effects recorded; Neon material properties remain in the model XML.")
+    return result
+end
+
 local function bundleAssets(root, snapshot)
     step("06B ASSET REFERENCES", "Recording asset IDs for the localhost backend; render surfaces are copied separately.")
     local entries, byKey, decalIDs, seenDecals = {}, {}, {}, {}
@@ -1372,6 +1403,7 @@ local function bundleAssets(root, snapshot)
     local files = {
         {name = "assetids.json", data = HttpService:JSONEncode(references)},
         {name = "animations.json", data = HttpService:JSONEncode(animations)},
+        {name = "rendering.json", data = HttpService:JSONEncode(captureRendering())},
     }
     for _, file in ipairs(copyRenderMeshes(root, snapshot)) do table.insert(files, file) end
     return files
@@ -1390,6 +1422,7 @@ logs report the result. Decal previews resolve through the localhost backend.
 The archive itself contains XML, IDs and available animation data, plus any successfully copied render mesh binaries.
 Fly motion uses the profile from the local decompilation. Available keyframe clips are
 captured in animations.json; unavailable clips are reported without blocking upload.
+rendering.json records the game exposure, BloomEffect and ColorCorrectionEffect settings.
 Original geometry requires original mesh files. Thumbnail images are previews.
 USSI licensing and credits are retained in LICENSE_USSI.txt.
 Local ZIP backup is optional; Discord uploads use the in-memory archive.
