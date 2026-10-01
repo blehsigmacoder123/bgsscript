@@ -1,5 +1,7 @@
 local CONFIG = {
-    PetName = "Godly Gem Mythic",
+    PetName = "",
+    Variants = (getgenv and getgenv() or _G).ASSET_EXPORT_VARIANTS or {"Normal"},
+    QueueDelay = 2,
     Webhook = (getgenv and getgenv() or _G).ASSET_EXPORT_WEBHOOK or "",
     LoadTimeout = 60,
     ExportTimeout = 120,
@@ -22,7 +24,7 @@ local stage = "BOOT"
 local idleConnection, exportTask, clone
 local abandoned, ownsLock = false, false
 local environment = getgenv and getgenv() or _G
-local outputPrefix, backupPath
+local outputPrefix, backupPath, cachedSerializer
 local HttpService = game:GetService("HttpService")
 local function log(level, message)
     local line = string.format("[PET EXPORT][%07.2fs][%s][%s] %s",
@@ -295,6 +297,7 @@ local function ussiExport(root, prefix)
     local complete, failure, serialized, callbackFailure = false, nil, nil, nil
     exportTask = task.spawn(function()
         local ok, err = xpcall(function()
+            if not cachedSerializer then
             step("05A LOAD USSI", "Downloading serializer commit " .. CONFIG.SerializerCommit .. " from GitHub.")
             log("INFO", "UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw")
             local requested, response = pcall(HttpRequest, {Url = CONFIG.SerializerURL, Method = "GET"})
@@ -307,8 +310,10 @@ local function ussiExport(root, prefix)
             requireThat(#source < 2 * 1024 * 1024, "USSI_DOWNLOAD: unexpected serializer size.")
             local chunk, compileError = loadstring(source, "USSI@" .. CONFIG.SerializerCommit)
             requireThat(type(chunk) == "function", "USSI_COMPILE: " .. redact(compileError))
-            local serializer = chunk()
-            requireThat(type(serializer) == "function", "USSI_INITIALIZE: module did not return a function.")
+            cachedSerializer = chunk()
+            requireThat(type(cachedSerializer) == "function", "USSI_INITIALIZE: module did not return a function.")
+            end
+            local serializer = cachedSerializer
             step("05B SERIALIZE", "Serializing only the isolated pet; XML output delivered through callback.")
             serializer({
                 Object = root,
@@ -359,8 +364,9 @@ local function ussiExport(root, prefix)
         complete = true
         if abandoned then
             if root then pcall(function() root:Destroy() end) end
-            if ownsLock then environment.ASSET_EXPORT_RUNNING = nil end
-            log("WARN", "Timed-out USSI operation finished cleanup; this run will not upload.")
+            exportTask = nil
+            abandoned = false
+            log("WARN", "Timed-out USSI operation finished cleanup; the queue can continue.")
         end
     end)
     local deadline, nextHeartbeat = os.clock() + CONFIG.ExportTimeout, os.clock() + 5
@@ -413,7 +419,7 @@ local function upload(zip, filename)
     local boundary = "PetExport" .. HttpService:GenerateGUID(false):gsub("%-", "")
     while zip:find(boundary, 1, true) do boundary = boundary .. "x" end
     local payload = HttpService:JSONEncode({
-        content = "Godly Gem Mythic export: Roblox XML, decal IDs, asset references and animation data.",
+        content = CONFIG.PetName .. " export: Roblox XML, decal IDs, asset references and animation data.",
         allowed_mentions = {parse = {}},
         attachments = {{id = 0, filename = filename, description = "Roblox-importable pet model ZIP"}},
     })
@@ -1436,7 +1442,7 @@ local function bundleAssets(root, snapshot)
     return files
 end
 
-local README = [[Godly Gem Mythic - model and asset-reference export
+local README = [[Secret pet - model and asset-reference export
 
 Upload this ZIP to the localhost model viewer.
 assetids.json records decal IDs, parent transforms, face normals, dimensions, local corners,
@@ -1456,58 +1462,86 @@ USSI licensing and credits are retained in LICENSE_USSI.txt.
 Local ZIP backup is optional; Discord uploads use the in-memory archive.
 ]]
 
-local function run()
-    step("01 PREFLIGHT", "Checking executor capabilities before changing or exporting anything.")
-    local missing = {}
-    for name, fn in pairs({HttpRequest = HttpRequest or false, loadstring = loadstring or false}) do
-        if type(fn) ~= "function" then table.insert(missing, name) end
+local function secretQueue(data, variants)
+    requireThat(type(data) == "table", "PET_DATA_FORMAT: Pets module must return a table.")
+    requireThat(type(variants) == "table" and #variants > 0, "VARIANTS_FORMAT: expected a nonempty variant list.")
+    local definitions = {Normal = {false, false}, Shiny = {true, false}, Mythic = {false, true}, ShinyMythic = {true, true}}
+    local seenVariants = {}
+    for _, variant in ipairs(variants) do
+        requireThat(definitions[variant] and not seenVariants[variant], "VARIANT_INVALID: " .. tostring(variant))
+        seenVariants[variant] = true
     end
-    table.sort(missing)
-    requireThat(#missing == 0, "CAPABILITY_MISSING: " .. table.concat(missing, ", ") ..
-        ". USSI requires source loading and this exporter requires HTTP.")
-    requireThat(bit32 ~= nil, "CAPABILITY_MISSING: bit32 required for ZIP CRC32.")
-    requireThat(not environment.ASSET_EXPORT_RUNNING, "EXPORT_BUSY: another pet export is still running.")
-    requireThat(not environment.USSI, "USSI_BUSY: another USSI operation is still running.")
-    environment.ASSET_EXPORT_RUNNING = true
-    ownsLock = true
-    requireThat(type(CONFIG.Webhook) == "string" and
-        CONFIG.Webhook:match("^https://discord%.com/api/webhooks/%d+/[%w_%-]+$"),
-        "WEBHOOK_FORMAT: set getgenv().ASSET_EXPORT_WEBHOOK to a clean Discord webhook URL before loading.")
-    initializeCRC()
-    requireThat(crc32("123456789") == 0xCBF43926, "ZIP_SELF_TEST: CRC32 reference vector failed.")
-    outputPrefix = "Godly_Gem_Mythic_" .. HttpService:GenerateGUID(false):gsub("%-", "")
-
-    step("02 LOAD", "Waiting for game and local player, with a bounded timeout.")
-    waitUntil(function() return game:IsLoaded() end, CONFIG.LoadTimeout, "GAME_TIMEOUT: game did not load.")
-    local players = game:GetService("Players")
-    waitUntil(function() return players.LocalPlayer ~= nil end, CONFIG.LoadTimeout,
-        "PLAYER_TIMEOUT: run this in a game client, not a server/Studio edit environment.")
-    local virtualUser = game:GetService("VirtualUser")
-    local reportedIdleFailure = false
-    idleConnection = players.LocalPlayer.Idled:Connect(function()
-        local ok, err = pcall(function()
-            virtualUser:CaptureController()
-            virtualUser:ClickButton2(Vector2.new(0, 0))
-        end)
-        if ok then log("INFO", "Anti-AFK idle input sent.")
-        elseif not reportedIdleFailure then
-            reportedIdleFailure = true
-            log("WARN", "Anti-AFK unavailable: " .. redact(err))
+    local secrets = {}
+    for name, entry in pairs(data) do
+        if type(name) == "string" and type(entry) == "table" and entry.Rarity == "Secret" then
+            table.insert(secrets, {name = name, data = entry, order = type(entry.LayoutOrder) == "number" and entry.LayoutOrder or math.huge})
         end
-    end)
-    log("INFO", "Anti-AFK connected for this export; disconnects on completion/failure.")
+    end
+    table.sort(secrets, function(a, b) if a.order == b.order then return a.name < b.name end return a.order < b.order end)
+    local queue = {}
+    for _, secret in ipairs(secrets) do
+        for _, variant in ipairs(variants) do
+            local flags = definitions[variant]
+            if not flags[2] or secret.data.Mythic == true or type(secret.data.Images) == "table" and secret.data.Images.Mythic ~= nil then
+                local key = secret.name .. (flags[2] and " Mythic" or "")
+                local label = (flags[1] and "Shiny " or "") .. key
+                local slug = label:gsub("[^%w_]+", "_"):sub(1, 100)
+                table.insert(queue, {name = secret.name, key = key, label = label, variant = variant,
+                    shiny = flags[1], mythic = flags[2], folder = flags[1] and "Shiny" or "Normal",
+                    filename = string.format("%04d_%s", #queue + 1, slug)})
+            end
+        end
+    end
+    for index, item in ipairs(queue) do item.index = index; item.total = #queue end
+    return queue
+end
 
-    step("03 LOCATE", 'Resolving ReplicatedStorage.Assets.Pets.Normal["' .. CONFIG.PetName .. '"].')
+local function notifyFailure(name)
+    local message = "FAILED: " .. name
+    local body = HttpService:JSONEncode({content = message, allowed_mentions = {parse = {}}})
+    for attempt = 1, CONFIG.RetryLimit do
+        local ok, response = pcall(HttpRequest, {Url = CONFIG.Webhook .. "?wait=true", Method = "POST",
+            Headers = {["Content-Type"] = "application/json"}, Body = body})
+        requireThat(ok and type(response) == "table", "FAILURE_NOTICE_TRANSPORT: " .. redact(response))
+        local status = tonumber(response.StatusCode or response.Status or response.status_code)
+        if status == 200 then
+            local parsed, receipt = pcall(HttpService.JSONDecode, HttpService, response.Body or response.body or "")
+            requireThat(parsed and type(receipt) == "table" and receipt.id, "FAILURE_NOTICE_RECEIPT: Discord receipt missing.")
+            log("INFO", "Discord confirmed failure notice: " .. message)
+            return
+        end
+        if status == 429 and attempt < CONFIG.RetryLimit then
+            local parsed, receipt = pcall(HttpService.JSONDecode, HttpService, response.Body or response.body or "")
+            local delay = parsed and type(receipt) == "table" and tonumber(receipt.retry_after)
+            requireThat(delay and delay >= 0 and delay <= CONFIG.MaxRetryWait, "FAILURE_NOTICE_RATE_LIMIT: invalid retry_after.")
+            task.wait(delay + .25)
+        else
+            error("FAILURE_NOTICE_REJECTED: HTTP " .. tostring(status) .. "; " .. redact(response.Body or response.body or ""), 0)
+        end
+    end
+end
+
+local function saveCurrentLog()
+    if type(writefile) ~= "function" then return end
+    local path = (outputPrefix or "Secret_Pet_Batch_failed") .. ".log"
+    local ok, err = pcall(writefile, path, table.concat(lines, "\n") .. "\n")
+    if not ok then log("WARN", "Cannot save log: " .. redact(err)) end
+end
+
+local function exportPet(item)
+    CONFIG.PetName = item.key
+    outputPrefix = item.filename .. "_" .. HttpService:GenerateGUID(false):gsub("%-", "")
+    step("03 LOCATE", 'Resolving ReplicatedStorage.Assets.Pets.' .. item.folder .. '["' .. CONFIG.PetName .. '"].')
     local replicatedStorage = game:GetService("ReplicatedStorage")
     local folder = replicatedStorage
-    for _, name in ipairs({"Assets", "Pets", "Normal"}) do
+    for _, name in ipairs({"Assets", "Pets", item.folder}) do
         local nextFolder = folder:FindFirstChild(name) or folder:WaitForChild(name, CONFIG.LoadTimeout)
         requireThat(nextFolder, "TARGET_FOLDER_MISSING: '" .. name .. "' under " .. folder:GetFullName())
         folder = nextFolder
     end
     local target = folder:FindFirstChild(CONFIG.PetName)
     if not target then
-        step("03A REQUEST MODEL", "Pet is not cached; requesting Godly Gem Mythic through Shared.Utils.GetPetModel.")
+        step("03A REQUEST MODEL", "Pet is not cached; requesting " .. CONFIG.PetName .. " through Shared.Utils.GetPetModel.")
         local shared = replicatedStorage:FindFirstChild("Shared")
         local utils = shared and shared:FindFirstChild("Utils")
         local module = utils and utils:FindFirstChild("GetPetModel")
@@ -1518,7 +1552,7 @@ local function run()
             local succeeded, value = pcall(function()
                 local getPetModel = require(module)
                 requireThat(type(getPetModel) == "function", "MODEL_LOADER_FORMAT: expected a function.")
-                return getPetModel({Name = "Godly Gem", Mythic = true, Shiny = false})
+                return getPetModel({Name = item.name, Mythic = item.mythic, Shiny = item.shiny})
             end)
             if succeeded then returned = value else requestFailure = redact(value) end
             complete = true
@@ -1528,7 +1562,7 @@ local function run()
             if os.clock() >= nextHeartbeat then
                 local cached = folder:FindFirstChild(CONFIG.PetName)
                 log("INFO", cached and "Target received; waiting for the game loader to finish tree validation/preload."
-                    or "Waiting for live-server model transfer: Normal/Godly Gem Mythic.")
+                    or "Waiting for live-server model transfer: " .. item.folder .. "/" .. CONFIG.PetName .. ".")
                 nextHeartbeat = os.clock() + 5
             end
             task.wait(0.2)
@@ -1541,10 +1575,10 @@ local function run()
         requireThat(not requestFailure, "MODEL_REQUEST_FAILED: " .. tostring(requestFailure))
         target = folder:FindFirstChild(CONFIG.PetName)
         requireThat(target and target:IsA("Model") and returned == target,
-            "MODEL_REQUEST_REJECTED: exact Godly Gem Mythic model was not delivered. " ..
+            "MODEL_REQUEST_REJECTED: exact " .. CONFIG.PetName .. " model was not delivered. " ..
             "The loader returned " .. (typeof(returned) == "Instance" and returned.Name or typeof(returned)) ..
             "; Doggy/fallback models are never exported. Nothing uploaded.")
-        log("INFO", "Live-server transfer completed; exact Godly Gem Mythic model cached and ready.")
+        log("INFO", "Live-server transfer completed; exact " .. CONFIG.PetName .. " model cached and ready.")
         step("03 LOCATE", "Inspecting the delivered pet model.")
     end
     requireThat(target:IsA("Model"), "TARGET_CLASS: expected Model, got " .. target.ClassName)
@@ -1566,6 +1600,7 @@ local function run()
     local knownURLs = {}
     local expectedFingerprint = sourceFingerprint(clone, knownURLs)
 
+    snapshot.batchExport = {index = item.index, total = item.total, name = item.name, variant = item.variant}
     snapshot.sourcePath = target:GetFullName()
     snapshot.format = "Roblox XML model + ZIP STORE"
     snapshot.embeddedAssetBinaries = false
@@ -1609,7 +1644,7 @@ local function run()
     step("07 ZIP", "Building ZIP with model XML, decal IDs, asset references and animation data.")
     local manifest = HttpService:JSONEncode(snapshot)
     local files = {
-        {name = "Godly_Gem_Mythic.rbxmx", data = xml},
+        {name = item.filename .. ".rbxmx", data = xml},
         {name = "manifest.json", data = manifest},
         {name = "README.txt", data = README},
         {name = "LICENSE_USSI.txt", data = USSI_LICENSE},
@@ -1623,25 +1658,113 @@ local function run()
     saveZipBackup(zip, zipPath)
 
     step("08 UPLOAD", "Uploading ZIP as a binary multipart Discord attachment.")
-    upload(zip, "Godly_Gem_Mythic.zip")
+    upload(zip, item.filename .. ".zip")
     step("09 DONE", "Discord confirmed ZIP receipt." ..
         (backupPath and (" Verified local backup: " .. backupPath) or " Uploaded from memory; no verified local ZIP backup."))
 end
 
-local ok, failure = xpcall(run, function(err)
-    return debug.traceback(redact(err), 2)
-end)
-if not ok then log("ERROR", failure) end
+local function processQueue(queue, exportOne, notifyOne)
+    local results = {total = #queue, succeeded = 0, failed = 0, notificationFailures = 0, pets = {}}
+    environment.ASSET_EXPORT_BATCH = results
+    for _, item in ipairs(queue) do
+        lines = {}
+        backupPath, outputPrefix = nil, nil
+        step("QUEUE", string.format("[%d/%d] %s", item.index, #queue, item.label))
+        local ok, failure = xpcall(function() exportOne(item) end, function(err) return debug.traceback(redact(err), 2) end)
+        if ok then results.succeeded += 1
+        else
+            results.failed += 1
+            log("ERROR", failure)
+            local notified, noticeError = pcall(notifyOne, item.label)
+            if not notified then
+                results.notificationFailures += 1
+                log("ERROR", "Could not deliver FAILED notice: " .. redact(noticeError))
+            end
+        end
+        local nextHeartbeat = os.clock() + 10
+        while abandoned or environment.USSI do
+            if os.clock() >= nextHeartbeat then
+                log("WARN", "Waiting for serializer cleanup before starting the next pet.")
+                nextHeartbeat = os.clock() + 10
+            end
+            task.wait(.5)
+        end
+        if clone then pcall(function() clone:Destroy() end); clone = nil end
+        exportTask = nil
+        saveCurrentLog()
+        table.insert(results.pets, {name = item.label, variant = item.variant, success = ok, error = not ok and failure or nil})
+        log("INFO", string.format("Queue progress: %d uploaded, %d failed; %d/%d processed.", results.succeeded, results.failed, item.index, #queue))
+        if item.index < #queue then task.wait(CONFIG.QueueDelay) end
+    end
+    return results
+end
 
+local function run()
+    step("01 PREFLIGHT", "Checking executor capabilities before changing or exporting anything.")
+    local missing = {}
+    for name, fn in pairs({HttpRequest = HttpRequest or false, loadstring = loadstring or false}) do
+        if type(fn) ~= "function" then table.insert(missing, name) end
+    end
+    table.sort(missing)
+    requireThat(#missing == 0, "CAPABILITY_MISSING: " .. table.concat(missing, ", ") ..
+        ". USSI requires source loading and this exporter requires HTTP.")
+    requireThat(bit32 ~= nil, "CAPABILITY_MISSING: bit32 required for ZIP CRC32.")
+    requireThat(not environment.ASSET_EXPORT_RUNNING, "EXPORT_BUSY: another pet export is still running.")
+    requireThat(not environment.USSI, "USSI_BUSY: another USSI operation is still running.")
+    environment.ASSET_EXPORT_RUNNING = true
+    ownsLock = true
+    requireThat(type(CONFIG.Webhook) == "string" and
+        CONFIG.Webhook:match("^https://discord%.com/api/webhooks/%d+/[%w_%-]+$"),
+        "WEBHOOK_FORMAT: set getgenv().ASSET_EXPORT_WEBHOOK to a clean Discord webhook URL before loading.")
+    initializeCRC()
+    requireThat(crc32("123456789") == 0xCBF43926, "ZIP_SELF_TEST: CRC32 reference vector failed.")
+
+    step("02 LOAD", "Waiting for game and local player, with a bounded timeout.")
+    waitUntil(function() return game:IsLoaded() end, CONFIG.LoadTimeout, "GAME_TIMEOUT: game did not load.")
+    local players = game:GetService("Players")
+    waitUntil(function() return players.LocalPlayer ~= nil end, CONFIG.LoadTimeout,
+        "PLAYER_TIMEOUT: run this in a game client, not a server/Studio edit environment.")
+    local virtualUser = game:GetService("VirtualUser")
+    local reportedIdleFailure = false
+    idleConnection = players.LocalPlayer.Idled:Connect(function()
+        local ok, err = pcall(function()
+            virtualUser:CaptureController()
+            virtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+        if ok then log("INFO", "Anti-AFK idle input sent.")
+        elseif not reportedIdleFailure then
+            reportedIdleFailure = true
+            log("WARN", "Anti-AFK unavailable: " .. redact(err))
+        end
+    end)
+    log("INFO", "Anti-AFK connected for the entire queue.")
+
+
+    step("QUEUE BUILD", "Reading Secret entries from ReplicatedStorage.Shared.Data.Pets in LayoutOrder.")
+    local replicatedStorage = game:GetService("ReplicatedStorage")
+    local module = replicatedStorage:WaitForChild("Shared", CONFIG.LoadTimeout)
+    requireThat(module, "PET_DATA_MISSING: Shared is unavailable.")
+    module = module:WaitForChild("Data", CONFIG.LoadTimeout)
+    requireThat(module, "PET_DATA_MISSING: Shared.Data is unavailable.")
+    module = module:WaitForChild("Pets", CONFIG.LoadTimeout)
+    requireThat(module and module:IsA("ModuleScript"), "PET_DATA_MISSING: Shared.Data.Pets is unavailable.")
+    local queue = secretQueue(require(module), CONFIG.Variants)
+    requireThat(#queue > 0, "SECRET_QUEUE_EMPTY: no Secret pets were found.")
+    log("INFO", string.format("Queued %d Secret exports; variants: %s. Each ZIP must be under 4.9 MB.", #queue, table.concat(CONFIG.Variants, ", ")))
+    local results = processQueue(queue, exportPet, notifyFailure)
+    step("BATCH DONE", string.format("Processed all %d pets: %d uploaded; %d failed; %d undelivered failure notices.", results.total, results.succeeded, results.failed, results.notificationFailures))
+    if type(writefile) == "function" then
+        local saved, err = pcall(writefile, "Secret_Pet_Batch_" .. HttpService:GenerateGUID(false):gsub("%-", "") .. ".json", HttpService:JSONEncode(results))
+        if not saved then log("WARN", "Cannot save batch summary: " .. redact(err)) end
+    end
+end
+
+local ok, failure = xpcall(run, function(err) return debug.traceback(redact(err), 2) end)
+if not ok then log("ERROR", failure) end
 if idleConnection then idleConnection:Disconnect() end
 if not abandoned then
     if clone then pcall(function() clone:Destroy() end) end
     if ownsLock then environment.ASSET_EXPORT_RUNNING = nil end
 end
-if type(writefile) == "function" then
-    local logPath = (outputPrefix or "Godly_Gem_Mythic_failed") .. ".log"
-    local saved, err = pcall(writefile, logPath, table.concat(lines, "\n") .. "\n")
-    if saved then log("INFO", "Complete console log saved: " .. logPath)
-    else log("WARN", "Cannot save log: " .. redact(err)) end
-end
-if not ok then warn("[PET EXPORT] FAILED. See the ERROR stage and traceback above. No success is claimed.") end
+saveCurrentLog()
+if not ok then warn("[PET EXPORT] Batch stopped. See the ERROR stage and traceback above.") end
