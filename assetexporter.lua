@@ -7,13 +7,13 @@ local CONFIG = {
     SerializerCommit = "5c90ae10718f70e9dfe2402d2f5e28a1fd8029f5",
     MaxModelBytes = 6 * 1024 * 1024,
 
-    MaxZipBytes = 8 * 1024 * 1024,
+    MaxZipBytes = 4900000,
     YieldEveryBytes = 32768,
     RetryLimit = 4,
     MaxRetryWait = 60,
     AssetTimeout = 35,
     MeshCopyTimeout = 12,
-    MaxSurfaceBytes = 7 * 1024 * 1024,
+    MaxSurfaceBytes = 4 * 1024 * 1024,
 }
 
 local started = os.clock()
