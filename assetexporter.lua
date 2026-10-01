@@ -1337,6 +1337,84 @@ local function copyRenderMeshes(root, snapshot)
     return files
 end
 
+local function copyLiveAppearance(root)
+    local function match(template, live, pairs)
+        if template.ClassName ~= live.ClassName then return false end
+        if template:IsA("MeshPart") and template.MeshId ~= live.MeshId then return false end
+        table.insert(pairs, {template, live})
+        local used = {}
+        for _, child in ipairs(template:GetChildren()) do
+            local found
+            for _, other in ipairs(live:GetChildren()) do
+                if not used[other] and child.Name == other.Name and child.ClassName == other.ClassName then
+                    used[other] = true
+                    found = other
+                    break
+                end
+            end
+            if not found or not match(child, found, pairs) then return false end
+        end
+        return true
+    end
+    local candidates = {}
+    local explicit = environment.ASSET_EXPORT_APPEARANCE_MODEL
+    local player = game:GetService("Players").LocalPlayer
+    local firstChild = root:GetChildren()[1]
+    local function consider(model)
+        local pairs = {}
+        if match(root, model, pairs) then
+            local owned = false
+            local ancestor = model
+            while ancestor and ancestor ~= workspace do
+                if ancestor.Name == player.Name or ancestor.Name == tostring(player.UserId)
+                    or ancestor:GetAttribute("Owner") == player.UserId
+                    or ancestor:GetAttribute("Owner") == player.Name
+                    or ancestor:GetAttribute("OwnerUserId") == player.UserId then owned = true end
+                local ownerValue = ancestor:FindFirstChild("Owner")
+                if ownerValue then
+                    local ok, owner = pcall(function() return ownerValue.Value end)
+                    if ok and (owner == player or owner == player.Name or owner == player.UserId) then owned = true end
+                end
+                ancestor = ancestor.Parent
+            end
+            table.insert(candidates, {model = model, pairs = pairs, owned = owned})
+        end
+    end
+    if explicit then
+        requireThat(typeof(explicit) == "Instance" and explicit:IsA("Model"), "APPEARANCE_MODEL: expected a Model instance.")
+        consider(explicit)
+    else
+        local scanned = 0
+        for _, instance in ipairs(workspace:GetDescendants()) do
+            if instance:IsA("Model") and (instance.Name == CONFIG.PetName or instance:GetAttribute("PetName") == CONFIG.PetName
+                or (firstChild and instance:FindFirstChild(firstChild.Name))) then consider(instance) end
+            scanned = scanned + 1
+            if scanned % 200 == 0 then task.wait() end
+        end
+        local owned = {}
+        for _, candidate in ipairs(candidates) do if candidate.owned then table.insert(owned, candidate) end end
+        if #owned > 0 then candidates = owned end
+    end
+    if #candidates ~= 1 then
+        log("WARN", "LIVE_APPEARANCE: " .. #candidates .. " matching equipped models. Keeping template appearance; no ambiguous model is selected. ASSET_EXPORT_APPEARANCE_MODEL can specify the equipped Model explicitly.")
+        return {source = "storage-template", matchingModels = #candidates, copiedProperties = 0}
+    end
+    local candidate, count = candidates[1], 0
+    for _, pair in ipairs(candidate.pairs) do
+        local template, live = pair[1], pair[2]
+        local names = template:IsA("BasePart") and {"Color", "Material", "MaterialVariant", "Reflectance", "Transparency"}
+            or template:IsA("Decal") and {"Color3", "Transparency", "EmissiveStrength", "EmissiveTint", "ZIndex"}
+            or template:IsA("ParticleEmitter") and {"Color", "Brightness", "LightEmission", "LightInfluence", "Size", "Transparency", "Rate", "Enabled"}
+            or {}
+        for _, name in ipairs(names) do
+            local ok = pcall(function() template[name] = live[name] end)
+            if ok then count = count + 1 end
+        end
+    end
+    log("INFO", "LIVE_APPEARANCE: copied " .. count .. " appearance properties from " .. candidate.model:GetFullName() .. "; geometry and transforms remain unchanged.")
+    return {source = "equipped-model", path = candidate.model:GetFullName(), copiedProperties = count}
+end
+
 local function captureRendering()
     local lighting = game:GetService("Lighting")
     local result = {schema = "pet-rendering-v1", lighting = {}, effects = {}}
@@ -1351,7 +1429,7 @@ local function captureRendering()
         end
         return values
     end
-    result.lighting = properties(lighting, {"Brightness", "ExposureCompensation", "Ambient", "OutdoorAmbient", "EnvironmentDiffuseScale", "EnvironmentSpecularScale", "ColorShift_Top", "ColorShift_Bottom"})
+    result.lighting = properties(lighting, {"Brightness", "ClockTime", "ExposureCompensation", "Ambient", "OutdoorAmbient", "EnvironmentDiffuseScale", "EnvironmentSpecularScale", "ColorShift_Top", "ColorShift_Bottom"})
     local function effects(parent)
         if not parent then return end
         for _, effect in ipairs(parent:GetChildren()) do
@@ -1422,7 +1500,9 @@ logs report the result. Decal previews resolve through the localhost backend.
 The archive itself contains XML, IDs and available animation data, plus any successfully copied render mesh binaries.
 Fly motion uses the profile from the local decompilation. Available keyframe clips are
 captured in animations.json; unavailable clips are reported without blocking upload.
-rendering.json records the game exposure, BloomEffect and ColorCorrectionEffect settings.
+rendering.json records clock time, lighting exposure, bloom and color correction.
+An unambiguous matching equipped model supplies live colors, materials and effect settings.
+manifest.json appearanceCapture records the chosen source or template fallback.
 Original geometry requires original mesh files. Thumbnail images are previews.
 USSI licensing and credits are retained in LICENSE_USSI.txt.
 Local ZIP backup is optional; Discord uploads use the in-memory archive.
@@ -1491,7 +1571,9 @@ local function run()
     local sourceSignature = instanceSignature(target)
     requireThat(instanceSignature(clone) == sourceSignature,
         "CLONE_INCOMPLETE: an unarchivable child or concurrent source change altered the hierarchy.")
+    local appearance = copyLiveAppearance(clone)
     local snapshot = inventory(clone)
+    snapshot.appearanceCapture = appearance
     local knownURLs = {}
     local expectedFingerprint = sourceFingerprint(clone, knownURLs)
 
