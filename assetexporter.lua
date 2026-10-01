@@ -19,7 +19,7 @@ local stage = "BOOT"
 local idleConnection, exportTask, clone
 local abandoned, ownsLock = false, false
 local environment = getgenv and getgenv() or _G
-local outputPrefix
+local outputPrefix, backupPath
 local HttpService = game:GetService("HttpService")
 local function log(level, message)
     local line = string.format("[PET EXPORT][%07.2fs][%s][%s] %s",
@@ -381,7 +381,32 @@ local function ussiExport(root, prefix)
     return serialized
 end
 
+local function saveZipBackup(zip, path)
+    if type(writefile) ~= "function" or type(readfile) ~= "function" then
+        log("WARN", "ZIP_BACKUP_UNAVAILABLE: filesystem write/read support is missing; uploading from memory.")
+        return
+    end
+    local written, writeError = pcall(writefile, path, zip)
+    if not written then
+        log("WARN", "ZIP_BACKUP_WRITE: " .. redact(writeError) .. "; uploading from memory.")
+        return
+    end
+    local readable, savedBytes = pcall(readfile, path)
+    if not readable then
+        log("WARN", "ZIP_BACKUP_READ: " .. redact(savedBytes) .. "; uploading from memory.")
+        return
+    end
+    if savedBytes ~= zip then
+        log("WARN", "ZIP_BACKUP_MISMATCH: local bytes differ; local file is unverified. Uploading original bytes from memory.")
+        return
+    end
+    backupPath = path
+    log("INFO", "ZIP written and byte-verified: " .. path .. " (" .. #zip .. " bytes).")
+end
+
 local function upload(zip, filename)
+    local backupNote = backupPath and ("Verified local ZIP: " .. backupPath)
+        or "No verified local ZIP backup is available"
     local boundary = "PetExport" .. HttpService:GenerateGUID(false):gsub("%-", "")
     while zip:find(boundary, 1, true) do boundary = boundary .. "x" end
     local payload = HttpService:JSONEncode({
@@ -404,7 +429,7 @@ local function upload(zip, filename)
         })
 
 
-        requireThat(ok, "HTTP_TRANSPORT: " .. redact(response) .. ". ZIP saved locally; check Discord before rerunning.")
+        requireThat(ok, "HTTP_TRANSPORT: " .. redact(response) .. ". " .. backupNote .. "; check Discord before rerunning.")
         requireThat(type(response) == "table", "HTTP_RESPONSE: executor returned no response table.")
         local status = tonumber(response.StatusCode or response.Status or response.status_code)
         local responseBody = tostring(response.Body or response.body or "")
@@ -426,16 +451,16 @@ local function upload(zip, filename)
             local decodedOK, decoded = pcall(HttpService.JSONDecode, HttpService, responseBody)
             local delay = decodedOK and type(decoded) == "table" and tonumber(decoded.retry_after) or nil
             requireThat(delay and delay >= 0 and delay <= CONFIG.MaxRetryWait,
-                "DISCORD_RATE_LIMIT: missing or excessive retry_after; ZIP saved locally.")
+                "DISCORD_RATE_LIMIT: missing or excessive retry_after; " .. backupNote)
             log("WARN", string.format("Rate limited; retrying in %.2f seconds.", delay + 0.25))
             task.wait(delay + 0.25)
         else
             error("DISCORD_REJECTED: HTTP " .. tostring(status) .. "; response: " ..
                 redact(responseBody:sub(1, 1800)) .. ". 413 means upload too large; " ..
-                "401/403/404 may indicate an invalid or inaccessible webhook. ZIP saved locally.", 0)
+                "401/403/404 may indicate an invalid or inaccessible webhook. " .. backupNote, 0)
         end
     end
-    error("DISCORD_RETRIES: rate-limit attempts exhausted. ZIP saved locally.", 0)
+    error("DISCORD_RETRIES: rate-limit attempts exhausted. " .. backupNote, 0)
 end
 
 local USSI_LICENSE = [====[                    GNU AFFERO GENERAL PUBLIC LICENSE
@@ -1129,19 +1154,20 @@ scripted particle bursts, and world lighting are not included. Disabled emitters
 may need the original game's code to emit particles.
 
 export.log contains progress up to ZIP creation. The full upload result or
-failure traceback is saved in a separate .log file alongside your local ZIP.
+failure traceback is saved in a separate .log file when filesystem access works.
+The local ZIP backup is optional. If writing or verifying it fails, the exporter
+logs a warning and uploads the original ZIP bytes directly from memory.
 ]]
 
 local function run()
     step("01 PREFLIGHT", "Checking executor capabilities before changing or exporting anything.")
     local missing = {}
-    for name, fn in pairs({HttpRequest = HttpRequest or false, loadstring = loadstring or false,
-        readfile = readfile or false, writefile = writefile or false}) do
+    for name, fn in pairs({HttpRequest = HttpRequest or false, loadstring = loadstring or false}) do
         if type(fn) ~= "function" then table.insert(missing, name) end
     end
     table.sort(missing)
     requireThat(#missing == 0, "CAPABILITY_MISSING: " .. table.concat(missing, ", ") ..
-        ". USSI requires source loading and this exporter requires HTTP plus local ZIP backup support.")
+        ". USSI requires source loading and this exporter requires HTTP.")
     requireThat(bit32 ~= nil, "CAPABILITY_MISSING: bit32 required for ZIP CRC32.")
     requireThat(not environment.ASSET_EXPORT_RUNNING, "EXPORT_BUSY: another pet export is still running.")
     requireThat(not environment.USSI, "USSI_BUSY: another USSI operation is still running.")
@@ -1250,13 +1276,13 @@ local function run()
     })
     requireThat(#zip <= CONFIG.MaxZipBytes, "ZIP_SIZE: archive exceeds configured upload/memory budget.")
     local zipPath = outputPrefix .. ".zip"
-    writefile(zipPath, zip)
-    requireThat(readfile(zipPath) == zip, "FILESYSTEM_CORRUPTION: ZIP readback differs from generated bytes.")
-    log("INFO", "ZIP written and byte-verified: " .. zipPath .. " (" .. #zip .. " bytes).")
+    log("INFO", "ZIP ready in memory (" .. #zip .. " bytes); attempting optional local backup.")
+    saveZipBackup(zip, zipPath)
 
     step("08 UPLOAD", "Uploading ZIP as a binary multipart Discord attachment.")
     upload(zip, "Ancient_Immortal_One.zip")
-    step("09 DONE", "Discord confirmed ZIP receipt. Local backup: " .. zipPath)
+    step("09 DONE", "Discord confirmed ZIP receipt." ..
+        (backupPath and (" Verified local backup: " .. backupPath) or " Uploaded from memory; no verified local ZIP backup."))
 end
 
 local ok, failure = xpcall(run, function(err)
