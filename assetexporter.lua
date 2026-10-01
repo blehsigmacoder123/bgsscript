@@ -12,6 +12,8 @@ local CONFIG = {
     RetryLimit = 4,
     MaxRetryWait = 60,
     AssetTimeout = 35,
+    MeshCopyTimeout = 12,
+    MaxSurfaceBytes = 5 * 1024 * 1024,
 }
 
 local started = os.clock()
@@ -1258,8 +1260,85 @@ local function decalPlacements(root)
     return result
 end
 
+local function copyRenderMeshes(root, snapshot)
+    step("06D RENDER MESHES", "Copying original render vertices, corner normals and UVs through the engine mesh API.")
+    local files, seen, failures, total = {}, {}, {}, 0
+    local service = game:GetService("AssetService")
+    for _, part in ipairs(root:GetDescendants()) do
+        if part:IsA("MeshPart") then
+            local id = assetID(part.MeshId)
+            if id and not seen[id] then
+                seen[id] = true
+                local editable
+                local ok, failure = pcall(function()
+                    requireThat(buffer and type(buffer.create) == "function", "MESH_COPY: buffer API unavailable.")
+                    editable = boundedCall("MESH_COPY", CONFIG.MeshCopyTimeout, function()
+                        local result = service:CreateEditableMeshAsync(part.MeshContent, {FixedSize = true})
+                        return result
+                    end)
+                    requireThat(editable, "MESH_COPY: engine returned no editable mesh (memory or permissions).")
+                    local faces = editable:GetFaces()
+                    requireThat(#faces > 0, "MESH_COPY: empty render surface.")
+                    local bytes = 37 + #faces * (3 * 40 + 12)
+                    requireThat(bytes + total <= CONFIG.MaxSurfaceBytes, "MESH_COPY_BUDGET: original surfaces exceed configured archive budget.")
+                    local data = buffer.create(bytes)
+                    buffer.writestring(data, 0, "version 4.00\n")
+                    buffer.writeu16(data, 13, 24)
+                    buffer.writeu32(data, 17, #faces * 3)
+                    buffer.writeu32(data, 21, #faces)
+                    local indexOffset = 37 + #faces * 3 * 40
+                    local vertex = 0
+                    for faceIndex, face in ipairs(faces) do
+                        local vertices = editable:GetFaceVertices(face)
+                        local normals = editable:GetFaceNormals(face)
+                        local uvs = editable:GetFaceUVs(face)
+                        local colorsOK, colors = pcall(function() return editable:GetFaceColors(face) end)
+                        requireThat(#vertices == 3 and #normals == 3 and #uvs == 3, "MESH_COPY: incomplete face attributes.")
+                        for corner = 1, 3 do
+                            local position = editable:GetPosition(vertices[corner])
+                            local normal = editable:GetNormal(normals[corner])
+                            local uv = editable:GetUV(uvs[corner])
+                            local offset = 37 + vertex * 40
+                            for axis, value in ipairs({position.X,position.Y,position.Z,normal.X,normal.Y,normal.Z,uv.X,uv.Y}) do
+                                requireThat(value == value and math.abs(value) < 1e10, "MESH_COPY: invalid numeric vertex data.")
+                                buffer.writef32(data, offset + (axis-1)*4, value)
+                            end
+                            for channel = 36, 39 do buffer.writeu8(data, offset + channel, 255) end
+                            if colorsOK and colors and colors[corner] then
+                                local color = editable:GetColor(colors[corner])
+                                local alpha = editable:GetColorAlpha(colors[corner]) or 1
+                                for channel, value in ipairs({color.R,color.G,color.B,alpha}) do
+                                    buffer.writeu8(data, offset + 35 + channel, math.floor(math.clamp(value,0,1)*255+.5))
+                                end
+                            end
+                            buffer.writeu32(data, indexOffset + ((faceIndex-1)*3+corner-1)*4, vertex)
+                            vertex = vertex + 1
+                        end
+                        if faceIndex % 100 == 0 then task.wait() end
+                    end
+                    table.insert(files, {name = "assets/meshes/" .. id .. ".mesh", data = buffer.tostring(data)})
+                    total = total + bytes
+                    log("INFO", "Original mesh copied: " .. id .. "; " .. #faces .. " triangles, normals + UVs; " .. bytes .. " bytes.")
+                end)
+                if editable then pcall(function() editable:Destroy() end) end
+                if not ok then
+                    table.insert(failures, {id = id, path = part:GetFullName(), error = redact(failure)})
+                    log("WARN", "ORIGINAL_MESH_UNAVAILABLE: " .. id .. ": " .. redact(failure))
+                    if #files == 0 then
+                        log("WARN", "Mesh API could not copy the first surface. Stopping mesh attempts to avoid repeated stalls. XML still preserves model instances and MeshIds; HTML will remain a collision preview.")
+                        break
+                    end
+                end
+            end
+        end
+    end
+    snapshot.renderMeshCopy = {copied = #files, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh", preservesNormals = true, preservesUVs = true}
+    snapshot.embeddedAssetBinaries = #files > 0
+    return files
+end
+
 local function bundleAssets(root, snapshot)
-    step("06B ASSET REFERENCES", "Recording asset IDs for the localhost backend; no mesh/image downloads in Delta.")
+    step("06B ASSET REFERENCES", "Recording asset IDs for the localhost backend; render surfaces are copied separately.")
     local entries, byKey, decalIDs, seenDecals = {}, {}, {}, {}
     for _, asset in ipairs(snapshot.assets) do
         local id = assetID(asset.value)
@@ -1290,10 +1369,12 @@ local function bundleAssets(root, snapshot)
     local animations = exportAnimations(root)
     snapshot.animationExport = {clips = #animations.clips, procedural = #animations.procedural,
         failures = #animations.failures, externalFollowCodeIncluded = false}
-    return {
+    local files = {
         {name = "assetids.json", data = HttpService:JSONEncode(references)},
         {name = "animations.json", data = HttpService:JSONEncode(animations)},
     }
+    for _, file in ipairs(copyRenderMeshes(root, snapshot)) do table.insert(files, file) end
+    return files
 end
 
 local README = [[Ancient Immortal One - model and asset-reference export
@@ -1302,9 +1383,11 @@ Upload this ZIP to the localhost model viewer.
 assetids.json records decal IDs, parent transforms, face normals, dimensions, local corners,
 tint, UV transforms and layers. XML remains the source of instance placement.
 The backend resolves decal thumbnail previews in POST batches of up to 100 IDs.
-No mesh or image downloads are attempted in Delta, and 401 errors from asset delivery
-cannot block this export. Referenced images are resolved by the localhost backend.
-The archive itself contains XML, IDs and available animation data, not image/mesh binaries.
+No direct mesh/image HTTP downloads are attempted in Delta. The exporter attempts
+to copy original render meshes through the engine EditableMesh API. Game permissions
+or executor capabilities may block this; renderMeshCopy in manifest.json and console
+logs report the result. Decal previews resolve through the localhost backend.
+The archive itself contains XML, IDs and available animation data, plus any successfully copied render mesh binaries.
 Fly motion uses the profile from the local decompilation. Available keyframe clips are
 captured in animations.json; unavailable clips are reported without blocking upload.
 Original geometry requires original mesh files. Thumbnail images are previews.
