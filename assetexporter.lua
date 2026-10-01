@@ -12,8 +12,6 @@ local CONFIG = {
     RetryLimit = 4,
     MaxRetryWait = 60,
     AssetTimeout = 35,
-    MaxAssetBytes = 6 * 1024 * 1024,
-    RequireOfflineAssets = true,
 }
 
 local started = os.clock()
@@ -186,7 +184,7 @@ local function inventory(root)
         for _, property in ipairs(ASSET_PROPERTIES) do
             local ok, value = pcall(function() return node[property] end)
             if ok and type(value) == "string" and value ~= "" then
-                table.insert(result.assets, {path = path, property = property, value = value})
+                table.insert(result.assets, {path = path, property = property, value = value, class = node.ClassName})
             end
         end
         if index % 25 == 0 then task.wait() end
@@ -413,7 +411,7 @@ local function upload(zip, filename)
     local boundary = "PetExport" .. HttpService:GenerateGUID(false):gsub("%-", "")
     while zip:find(boundary, 1, true) do boundary = boundary .. "x" end
     local payload = HttpService:JSONEncode({
-        content = "Ancient Immortal One offline export: original mesh/image files, face decals, animation data and Roblox XML.",
+        content = "Ancient Immortal One export: Roblox XML, decal IDs, asset references and animation data.",
         allowed_mentions = {parse = {}},
         attachments = {{id = 0, filename = filename, description = "Roblox-importable pet model ZIP"}},
     })
@@ -1155,107 +1153,6 @@ local function assetID(value)
         or value:match("^%d+$")
 end
 
-local function assetGET(url)
-    for attempt = 1, 3 do
-        local response = boundedCall("ASSET_HTTP", CONFIG.AssetTimeout, function()
-            return HttpRequest({Url = url, Method = "GET", Headers = {Accept = "*/*"}})
-        end)
-        requireThat(type(response) == "table", "ASSET_HTTP: missing response table")
-        local status = tonumber(response.StatusCode or response.Status or response.status_code)
-        local body = response.Body or response.body
-        if status == 200 then
-            requireThat(type(body) == "string" and #body > 0, "ASSET_BODY: empty response")
-            requireThat(#body <= CONFIG.MaxAssetBytes, "ASSET_SIZE: asset exceeds memory budget")
-            return body
-        end
-        if status == 301 or status == 302 or status == 303 or status == 307 or status == 308 then
-            local headers = response.Headers or response.headers or {}
-            local location
-            for key, value in pairs(headers) do
-                if tostring(key):lower() == "location" then location = value end
-            end
-            requireThat(type(location) == "string" and location:match("^https://"),
-                "ASSET_REDIRECT: response has no safe asset location")
-            return HttpService:JSONEncode({location = location})
-        end
-        if (status == 429 or (status and status >= 500)) and attempt < 3 then
-            log("WARN", "Asset HTTP " .. tostring(status) .. "; retry " .. (attempt + 1))
-            task.wait(attempt * 1.5)
-        else
-            error("ASSET_HTTP: status " .. tostring(status) .. "; " ..
-                redact(tostring(body):sub(1, 180)), 0)
-        end
-    end
-end
-
-local function resolveAsset(id)
-    local url = "https://assetdelivery.roblox.com/v1/asset/?id=" .. id
-    local seen = {}
-    for _ = 1, 5 do
-        requireThat(not seen[url], "ASSET_REDIRECT: asset location cycle")
-        seen[url] = true
-        local body = assetGET(url)
-        if body:match("^%s*{") then
-            local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
-            if ok and type(data) == "table" then
-                local location = data.location or data.Location
-                if not location and type(data.locations) == "table" and data.locations[1] then
-                    location = data.locations[1].location or data.locations[1].Location
-                end
-                requireThat(type(location) == "string" and location:match("^https://"),
-                    "ASSET_DELIVERY: returned metadata without an asset location")
-                url = location
-            else
-                return body
-            end
-        else
-            return body
-        end
-    end
-    error("ASSET_REDIRECT: too many asset locations", 0)
-end
-
-local function assetFormat(body, kind)
-    if kind == "mesh" and body:match("^version %d+%.%d+\n") then return "mesh" end
-    if kind == "image" then
-        if body:sub(1, 8) == "\137PNG\13\10\26\10" then return "png" end
-        if body:sub(1, 3) == "\255\216\255" then return "jpg" end
-        if body:sub(1, 4) == "RIFF" and body:sub(9, 12) == "WEBP" then return "webp" end
-        if body:sub(1, 3) == "GIF" then return "gif" end
-    end
-    return nil
-end
-
-local function unwrapAsset(body, kind, originalID)
-    local ext = assetFormat(body, kind)
-    if ext then return body, ext end
-    if body:find("<roblox", 1, true) then
-        local id = body:match("rbxassetid://(%d+)") or body:match("[?&]id=(%d+)")
-        if not id and body:sub(1, 8) == "<roblox!" and originalID then
-            local objects = boundedCall("ASSET_WRAPPER_LOAD", CONFIG.AssetTimeout, function()
-                return game:GetObjects("rbxassetid://" .. originalID)
-            end)
-            for _, object in ipairs(objects) do
-                local candidates = {object}
-                for _, child in ipairs(object:GetDescendants()) do table.insert(candidates, child) end
-                for _, node in ipairs(candidates) do
-                    for _, property in ipairs(kind == "mesh" and {"MeshId"} or {"Texture", "Image"}) do
-                        local ok, value = pcall(function() return node[property] end)
-                        local candidate = ok and assetID(value) or nil
-                        if candidate and candidate ~= originalID then id = id or candidate end
-                    end
-                end
-                pcall(function() object:Destroy() end)
-            end
-        end
-        requireThat(id and id ~= originalID, "ASSET_WRAPPER: no underlying image/mesh reference")
-        body = resolveAsset(id)
-        ext = assetFormat(body, kind)
-        if ext then return body, ext end
-    end
-    error("ASSET_FORMAT: expected " .. kind .. " bytes; got an unsupported response signature", 0)
-end
-
 local function cframeArray(value)
     return {value:GetComponents()}
 end
@@ -1320,75 +1217,53 @@ local function exportAnimations(root)
 end
 
 local function bundleAssets(root, snapshot)
-    step("06B OFFLINE ASSETS", "Embedding original surface meshes, face decals and effect images.")
-    local plan, byKey, files = {}, {}, {}
+    step("06B ASSET REFERENCES", "Recording asset IDs for the localhost backend; no mesh/image downloads in Delta.")
+    local entries, byKey, decalIDs, seenDecals = {}, {}, {}, {}
     for _, asset in ipairs(snapshot.assets) do
+        local id = assetID(asset.value)
         local kind = asset.property == "MeshId" and "mesh" or
-            (asset.property ~= "AnimationId" and asset.property ~= "SoundId" and "image" or nil)
-        if kind then
-            local id = assetID(asset.value)
-            local key = kind .. ":" .. (id or asset.value)
-            if not byKey[key] then
-                local entry = {id = id, kind = kind, source = asset.value, references = {}}
-                byKey[key] = entry
-                table.insert(plan, entry)
-            end
-            table.insert(byKey[key].references, {path = asset.path, property = asset.property})
+            (asset.property == "AnimationId" and "animation" or
+            (asset.property == "SoundId" and "sound" or "image"))
+        local key = kind .. ":" .. (id or asset.value)
+        if not byKey[key] then
+            local entry = {id = id, kind = kind, source = asset.value, status = "referenced", references = {}}
+            byKey[key] = entry
+            table.insert(entries, entry)
+        end
+        table.insert(byKey[key].references, {path = asset.path, property = asset.property, class = asset.class})
+        if asset.class == "Decal" and asset.property == "Texture" and id and not seenDecals[id] then
+            seenDecals[id] = true
+            table.insert(decalIDs, id)
         end
     end
-    snapshot.offlineAssets = {schema = "pet-assets-v1", entries = plan, complete = true}
-    local total, failures = 0, {}
-    for index, entry in ipairs(plan) do
-        log("INFO", string.format("Asset %d/%d: %s %s", index, #plan, entry.kind, entry.id or entry.source))
-        local ok, failure = pcall(function()
-            requireThat(entry.id, "ASSET_ID: unsupported content URI " .. entry.source)
-            local body, ext = unwrapAsset(resolveAsset(entry.id), entry.kind, entry.id)
-            requireThat(total + #body + CONFIG.MaxModelBytes / 6 < CONFIG.MaxZipBytes,
-                "ASSET_BUDGET: bundled assets exceed ZIP budget; raise MaxZipBytes only if your webhook accepts it")
-            entry.file = "assets/" .. (entry.kind == "mesh" and "meshes/" or "images/") .. entry.id .. "." .. ext
-            entry.status = "embedded"
-            entry.bytes = #body
-            entry.crc32 = string.format("%08x", crc32(body))
-            total = total + #body
-            table.insert(files, {name = entry.file, data = body})
-            log("INFO", "Embedded " .. entry.file .. " (" .. #body .. " bytes)")
-        end)
-        if not ok then
-            entry.status = "missing"
-            entry.error = redact(failure)
-            snapshot.offlineAssets.complete = false
-            table.insert(failures, (entry.id or entry.source) .. ": " .. entry.error)
-            log("ERROR", "Asset failed: " .. failures[#failures])
-        end
-        task.wait()
-    end
-    snapshot.embeddedAssetBinaries = #files > 0
-    snapshot.offlineAssets.totalBytes = total
-    requireThat(not CONFIG.RequireOfflineAssets or #failures == 0,
-        "OFFLINE_INCOMPLETE: " .. #failures .. " mesh/image assets unavailable. " ..
-        "A reference-only ZIP would reproduce the same missing face/rough geometry, so nothing uploaded. " ..
-        table.concat(failures, " | "))
+    table.sort(decalIDs)
+    snapshot.embeddedAssetBinaries = false
+    snapshot.offlineAssets = {schema = "pet-assets-v1", entries = entries, complete = false, totalBytes = 0}
+    snapshot.assetResolution = {mode = "localhost-backend", exporterDownloadsAssets = false}
+    local references = {schema = "pet-asset-references-v1", petName = CONFIG.PetName,
+        placeId = game.PlaceId, universeId = game.GameId, decalIds = decalIDs, assets = entries}
+    log("INFO", #entries .. " unique asset references; " .. #decalIDs .. " decal image IDs recorded.")
+    for _, id in ipairs(decalIDs) do log("INFO", "Face/decal asset ID: " .. id) end
     step("06C ANIMATIONS", "Capturing available keyframes and pet motion metadata.")
     local animations = exportAnimations(root)
-    requireThat(not CONFIG.RequireOfflineAssets or #animations.failures == 0,
-        "OFFLINE_ANIMATION: a referenced animation clip could not be captured; nothing uploaded")
     snapshot.animationExport = {clips = #animations.clips, procedural = #animations.procedural,
         failures = #animations.failures, externalFollowCodeIncluded = false}
-    table.insert(files, {name = "animations.json", data = HttpService:JSONEncode(animations)})
-    return files
+    return {
+        {name = "assetids.json", data = HttpService:JSONEncode(references)},
+        {name = "animations.json", data = HttpService:JSONEncode(animations)},
+    }
 end
 
-local README = [[Ancient Immortal One - offline pet model bundle
+local README = [[Ancient Immortal One - model and asset-reference export
 
-Open modelviewer.html on localhost and upload this ZIP. Original mesh files,
-normals, UVs, face images and particle textures are bundled under assets/.
-The viewer never contacts Roblox. manifest.json maps references to local files.
-Missing mesh/image data stops the export instead of claiming an offline success.
-Animation clips accessible to the client are captured in animations.json.
-Fly includes the motion profile found in the local game decompilation.
-Owner-follow paths, world lighting, scripts and unsupported animation channels
-are excluded. Asset permissions may prevent an offline export.
-The XML model still uses asset IDs for importing into Roblox Studio.
+Upload this ZIP to the localhost model viewer.
+assetids.json records the decal IDs and all typed asset references for backend resolution.
+No mesh or image downloads are attempted in Delta, and 401 errors from asset delivery
+cannot block this export. Referenced images are resolved by the localhost backend.
+The archive itself contains XML, IDs and available animation data, not image/mesh binaries.
+Fly motion uses the profile from the local decompilation. Available keyframe clips are
+captured in animations.json; unavailable clips are reported without blocking upload.
+Original geometry requires original mesh files. Thumbnail images are previews.
 USSI licensing and credits are retained in LICENSE_USSI.txt.
 Local ZIP backup is optional; Discord uploads use the in-memory archive.
 ]]
@@ -1500,7 +1375,7 @@ local function run()
     log("WARN", "Asset permissions, external game animation, and visual fidelity require a Studio import check.")
 
     local bundledFiles = bundleAssets(clone, snapshot)
-    step("07 ZIP", "Building offline ZIP with original assets and animation data.")
+    step("07 ZIP", "Building ZIP with model XML, decal IDs, asset references and animation data.")
     local manifest = HttpService:JSONEncode(snapshot)
     local files = {
         {name = "Ancient_Immortal_One.rbxmx", data = xml},
