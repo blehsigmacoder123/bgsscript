@@ -1,5 +1,6 @@
 local CONFIG = {
     PetName = "",
+    OnlyPet = "Dark Infernal",
     Variants = (getgenv and getgenv() or _G).ASSET_EXPORT_VARIANTS or {"Normal"},
     QueueDelay = 2,
     Webhook = (getgenv and getgenv() or _G).ASSET_EXPORT_WEBHOOK or "",
@@ -1740,7 +1741,7 @@ local function run()
     log("INFO", "Anti-AFK connected for the entire queue.")
 
 
-    step("QUEUE BUILD", "Reading Secret entries from ReplicatedStorage.Shared.Data.Pets in LayoutOrder.")
+    step("QUEUE BUILD", CONFIG.OnlyPet and ("Preparing only the Normal " .. CONFIG.OnlyPet .. " storage model.") or "Reading Secret entries from ReplicatedStorage.Shared.Data.Pets in LayoutOrder.")
     local replicatedStorage = game:GetService("ReplicatedStorage")
     local module = replicatedStorage:WaitForChild("Shared", CONFIG.LoadTimeout)
     requireThat(module, "PET_DATA_MISSING: Shared is unavailable.")
@@ -1748,9 +1749,17 @@ local function run()
     requireThat(module, "PET_DATA_MISSING: Shared.Data is unavailable.")
     module = module:WaitForChild("Pets", CONFIG.LoadTimeout)
     requireThat(module and module:IsA("ModuleScript"), "PET_DATA_MISSING: Shared.Data.Pets is unavailable.")
-    local queue = secretQueue(require(module), CONFIG.Variants)
+    local data = require(module)
+    local selected = data
+    local variants = CONFIG.Variants
+    if CONFIG.OnlyPet then
+        requireThat(type(data) == "table" and type(data[CONFIG.OnlyPet]) == "table", "PET_DATA_MISSING: " .. CONFIG.OnlyPet)
+        selected = {[CONFIG.OnlyPet] = data[CONFIG.OnlyPet]}
+        variants = {"Normal"}
+    end
+    local queue = secretQueue(selected, variants)
     requireThat(#queue > 0, "SECRET_QUEUE_EMPTY: no Secret pets were found.")
-    log("INFO", string.format("Queued %d Secret exports; variants: %s. Each ZIP must be under 4.9 MB.", #queue, table.concat(CONFIG.Variants, ", ")))
+    log("INFO", string.format("Queued %d Secret exports; variants: %s. Each ZIP must be under 4.9 MB.", #queue, table.concat(variants, ", ")))
     local results = processQueue(queue, exportPet, notifyFailure)
     step("BATCH DONE", string.format("Processed all %d pets: %d uploaded; %d failed; %d undelivered failure notices.", results.total, results.succeeded, results.failed, results.notificationFailures))
     if type(writefile) == "function" then
