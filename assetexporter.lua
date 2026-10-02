@@ -1166,8 +1166,139 @@ local function cframeArray(value)
     return {value:GetComponents()}
 end
 
+local function captureVisualPrograms(root)
+    local result = {schema = "pet-visual-programs-v1", programs = {}, unsupported = {},
+        source = "Shared VisualPet custom modules from the BGSI game decompilation"}
+    local name = CONFIG.PetName:gsub(" Mythic$", "")
+    local mythic = CONFIG.PetName:match(" Mythic$") ~= nil
+    local function identity(node)
+        local path, parent = {}, node
+        while parent do
+            table.insert(path, 1, parent.Name)
+            if parent == root then break end
+            parent = parent.Parent
+        end
+        local owner = node
+        while owner and not owner:IsA("BasePart") do owner = owner.Parent end
+        return {path = path, class = node.ClassName, cframe = owner and cframeArray(owner.CFrame) or nil}
+    end
+    local paired = {"The Elder", "Danger of the Abyss", "Gryphon", "Prototype DR4G0N", "Gingerbread Shard", "Santa's Hat"}
+    local neon = {"Neon Overlord", "Neon Pyramidium", "Neon Soul", "Neon Dragon", "Neon Seeker"}
+    local patriotic = {"Patriotic Robot", "Patriotic Elemental", "OG Patriotic Robot", "Patriotic Robot 2.0", "Patriotic Overlord", "Patriotic Marshmallow", "Patriotic Star", "Patriotic Koi"}
+    local supported, decoration = false, root:FindFirstChild("Decoration")
+    local hitbox = root:FindFirstChild("Hitbox")
+    if table.find(paired, name) or name == "The Leviathan" then
+        supported = true
+        if not decoration or not hitbox or not hitbox:IsA("BasePart") then
+            table.insert(result.unsupported, "Custom wing rig lacks Decoration or Hitbox")
+        else
+            local program = {type = "pivot-rig", name = "Wings and tail", root = identity(hitbox), angularFrequency = 4, groups = {}}
+            local function group(node, id, parentId, parentPivot, channels)
+                if not node or not (node:IsA("Model") or node:IsA("BasePart")) then return nil end
+                local pivot, members = node:GetPivot(), {}
+                local nodes = node:GetDescendants()
+                if node:IsA("BasePart") then table.insert(nodes, 1, node) end
+                for _, part in ipairs(nodes) do
+                    if part:IsA("BasePart") then
+                        local member = identity(part)
+                        member.relative = cframeArray(pivot:ToObjectSpace(part.CFrame))
+                        table.insert(members, member)
+                    end
+                end
+                table.insert(program.groups, {id = id, parent = parentId, target = identity(node),
+                    pivot = cframeArray(pivot), rest = cframeArray(parentPivot:ToObjectSpace(pivot)),
+                    channels = channels, members = members})
+                return pivot
+            end
+            local leviathan = name == "The Leviathan"
+            if leviathan then
+                local wings = decoration:FindFirstChild("Wings")
+                if wings then
+                    for index, wing in ipairs(wings:GetChildren()) do
+                        group(wing, "wing" .. index, "root", hitbox.CFrame,
+                            {{axis = "y", wave = "cos", degrees = wing.Name == "Left" and -35 or 35}})
+                    end
+                end
+            else
+                for _, side in ipairs({{name = "LeftWing", sign = 1}, {name = "RightWing", sign = -1}}) do
+                    group(decoration:FindFirstChild(side.name), side.name, "root", hitbox.CFrame,
+                        {{axis = "x", wave = "sin", degrees = 30, offsetDegrees = 30},
+                         {axis = "y", wave = "cos", degrees = -45 * side.sign}})
+                end
+            end
+            if #program.groups < 2 then table.insert(result.unsupported, "Custom rig is missing a wing group") end
+            local tail, previous, parentId = decoration:FindFirstChild("Tail"), hitbox.CFrame, "root"
+            if leviathan and not tail then table.insert(result.unsupported, "Custom Leviathan tail is unavailable") end
+            if tail then
+                for index = 1, leviathan and 3 or 4 do
+                    local id = "tail" .. index
+                    local pivot = group(tail:FindFirstChild(tostring(index)), id, parentId, previous,
+                        {{axis = leviathan and "x" or "z", wave = "cos", degrees = leviathan and 10 or -10}})
+                    if not pivot then
+                        table.insert(result.unsupported, "Custom tail segment missing: " .. index)
+                        break
+                    end
+                    previous, parentId = pivot, id
+                end
+            end
+            if #program.groups > 0 then table.insert(result.programs, program)
+            else table.insert(result.unsupported, "Custom wing groups are unavailable") end
+        end
+    end
+    if table.find(neon, name) or table.find(patriotic, name) then
+        supported = true
+        local isNeon = table.find(neon, name) ~= nil
+        local normalFrame = isNeon and {{52,168,200},{175,85,185}} or {{162,58,72},{163,162,165},{84,134,165}}
+        local normalParticles = isNeon and {{66,214,255},{223,107,234}} or {{255,42,46},{255,255,255},{0,170,255}}
+        local framePalettes = {
+            ["OG Patriotic Robot"] = {{255,96,99},{210,209,213},{119,192,234}},
+            ["Patriotic Robot 2.0"] = {{255,55,58},{210,209,213},{65,181,234}},
+            ["Patriotic Marshmallow"] = {{255,55,58},{210,209,213},{65,181,234}},
+            ["Patriotic Overlord"] = {{199,43,46},{210,209,213},{54,153,195}},
+            ["Patriotic Star"] = {{195,50,52},{210,209,213},{50,145,179}},
+        }
+        normalFrame = framePalettes[name] or normalFrame
+        local mythicFrames = name == "Patriotic Star" and {{187,136,207},{212,178,105}} or {{149,108,165},{170,144,84}}
+        local frames = mythic and (isNeon and {{199,122,243},{209,158,75}} or mythicFrames) or normalFrame
+        local particles = mythic and {{247,135,255},{255,198,85}} or normalParticles
+        local program = {type = "color-cycle", name = "Shared frame and particle colors", segmentDuration = 1.5, targets = {}}
+        local function add(node, kind, palette)
+            local target = identity(node)
+            target.kind, target.palette = kind, palette
+            table.insert(program.targets, target)
+        end
+        local singleFrame
+        if name == "Patriotic Robot" and decoration then pcall(function() singleFrame = decoration.Frame end) end
+        if decoration then
+            for _, node in ipairs(decoration:GetDescendants()) do
+                if node:IsA("ParticleEmitter") then add(node, "particle", particles)
+                elseif node.Name == "Frame" and node:IsA("BasePart") and
+                    ((name == "Patriotic Robot" and node == singleFrame) or
+                     (name ~= "Patriotic Robot" and ((name ~= "Patriotic Elemental" and name ~= "Patriotic Koi") or node:IsA("MeshPart")))) then
+                    add(node, "part", frames)
+                    if name ~= "Patriotic Robot" then
+                        for _, decal in ipairs(node:GetDescendants()) do
+                            if decal:IsA("Decal") then add(decal, "decal", frames) end
+                        end
+                    end
+                end
+            end
+        end
+        if #program.targets > 0 then table.insert(result.programs, program) end
+    end
+    local module = game:GetService("ReplicatedStorage"):FindFirstChild("Client")
+    module = module and module:FindFirstChild("PetRender")
+    module = module and module:FindFirstChild("VisualPet")
+    if module and module:FindFirstChild(name) and not supported then
+        table.insert(result.unsupported, "Custom VisualPet module has no portable recipe: " .. name)
+    end
+    log("INFO", #result.programs .. " shared visual programs captured; " .. #result.unsupported .. " unsupported custom behaviors.")
+    for _, message in ipairs(result.unsupported) do log("WARN", "VISUAL_PROGRAM: " .. message) end
+    return result
+end
+
 local function exportAnimations(root)
-    local result = {schema = "pet-animations-v1", clips = {}, procedural = {}, failures = {}}
+    local result = {schema = "pet-animations-v1", clips = {}, procedural = {}, failures = {}, runtime = captureVisualPrograms(root)}
     local state = root:GetAttribute("Animation")
     if state == "Fly" then
         table.insert(result.procedural, {name = "Fly", type = "bgsi-fly", angularFrequency = 4,
@@ -1388,7 +1519,8 @@ end
 
 local function captureRendering(root)
     local lighting = game:GetService("Lighting")
-    local result = {schema = "pet-rendering-v1", revision = 2, lighting = {}, effects = {}, parts = {}, visuals = {}, colorSource = "storage-model-clone",
+    local result = {schema = "pet-rendering-v1", revision = 3, lighting = {}, effects = {}, parts = {}, visuals = {}, colorSource = "storage-model-clone",
+        colorSemantics = {colors = "sRGB", meshMultipliers = "linear", vertexColors = "sRGB", vertexAlpha = "linear", lighting = "sRGB-colors-linear-intensity"},
         runtime = {dynamicLighting = true, nightClockMaximum = 6, onIsland = false, enableParticlesAndLights = true, rainbowPeriod = 4}}
     local player = game:GetService("Players").LocalPlayer
     result.runtime.onIsland = player and player:GetAttribute("OnIsland") == true or false
@@ -1410,7 +1542,7 @@ local function captureRendering(root)
         local owner = node
         while owner and not owner:IsA("BasePart") do owner = owner.Parent end
         local visual = {path = path, class = node.ClassName, values = {}, attributes = {}, ownerCFrame = owner and cframeArray(owner.CFrame) or nil}
-        local names = node:IsA("BasePart") and {"Color", "Material", "Transparency"}
+        local names = node:IsA("BasePart") and {"Color", "Material", "Transparency", "Reflectance"}
             or node:IsA("SpecialMesh") and {"VertexColor"}
             or node:IsA("SurfaceAppearance") and {"Color", "AlphaMode"}
             or node:IsA("Decal") and {"Color3", "Transparency"}
@@ -1456,8 +1588,8 @@ local function captureRendering(root)
     local renderModule = game:GetService("ReplicatedStorage"):FindFirstChild("Client")
     renderModule = renderModule and renderModule:FindFirstChild("PetRender")
     renderModule = renderModule and renderModule:FindFirstChild("VisualPet")
-    result.runtime.customRig = renderModule and renderModule:FindFirstChild(CONFIG.PetName) ~= nil or false
-    if result.runtime.customRig then log("WARN", "CUSTOM_VISUAL_RIG: this pet has game-specific visual code; source assets are captured, live scripted changes require viewer support.") end
+    result.runtime.customRig = renderModule and renderModule:FindFirstChild((CONFIG.PetName:gsub(" Mythic$", ""))) ~= nil or false
+    if result.runtime.customRig then log("INFO", "CUSTOM_VISUAL_RIG: shared wing and color recipes are stored in animations.json; unsupported behaviors are reported separately.") end
     log("INFO", #result.parts .. " direct colors with transform identity, " .. #result.visuals .. " typed appearance records and " .. #result.effects .. " bloom/color effects recorded.")
     return result
 end
@@ -1514,10 +1646,12 @@ to copy original render meshes through the engine EditableMesh API. Game permiss
 or executor capabilities may block this; renderMeshCopy in manifest.json and console
 logs report the result. Decal previews resolve through the localhost backend.
 The archive itself contains XML, IDs and available animation data, plus any successfully copied render mesh binaries.
-Fly motion uses the profile from the local decompilation. Available keyframe clips are
-captured in animations.json; unavailable clips are reported without blocking upload.
+Shared body motion, supported wing/tail rigs with original pivots, and frame/particle
+color cycles are captured as portable data in animations.json. Available keyframe clips
+are captured too; unsupported custom behaviors and unavailable clips are reported.
 rendering.json records clock time, lighting exposure, bloom and color correction.
-The storage model is the sole source of pet colors, materials and effect settings.
+The storage model supplies the original colors, materials and effect settings.
+Captured shared game programs supply dynamic colors and custom wing/tail movement.
 Original geometry requires original mesh files. Thumbnail images are previews.
 USSI licensing and credits are retained in LICENSE_USSI.txt.
 Local ZIP backup is optional; Discord uploads use the in-memory archive.
