@@ -1174,6 +1174,18 @@ local function exportAnimations(root)
             bobAmplitude = 0.5, pitchDegrees = 8, lift = 3, smoothing = 0.3,
             source = "Fly formula from the local game decompilation; owner-follow movement excluded"})
         log("INFO", "Fly profile included: 0.5-stud bob, 8-degree pitch, 4 rad/sec; follow path excluded.")
+    elseif state == "Hover" or state == "Takeoff" or state == "Walk" or state == "Bounce" then
+        local profiles = {
+            Hover = {lift = 3, bobAmplitude = 0.35, angularFrequency = 6},
+            Takeoff = {lift = 4, bobAmplitude = 0.5, angularFrequency = 4, pitchDegrees = 8},
+            Walk = {lift = 0, bobAmplitude = 3, angularFrequency = 10, absoluteBob = true, rollDegrees = 20},
+            Bounce = {lift = 0, bobAmplitude = 3, angularFrequency = 10, absoluteBob = true, pitchDegrees = 20, pitchFrequency = 20},
+        }
+        local profile = profiles[state]
+        profile.name, profile.type, profile.smoothing = state, "bgsi-motion", 0.3
+        profile.source = "Shared VisualPet motion formula; owner-follow movement excluded"
+        table.insert(result.procedural, profile)
+        log("INFO", state .. " motion profile included from the shared pet renderer.")
     end
     local function capture(sequence, name, id)
         requireThat(sequence:IsA("KeyframeSequence"), "ANIMATION_TYPE: only KeyframeSequence is supported")
@@ -1290,15 +1302,16 @@ local function copyRenderMeshes(root, snapshot)
                     local indexBytes = #faces * 12
                     requireThat(37 + indexBytes + total <= CONFIG.MaxSurfaceBytes, "MESH_COPY_BUDGET: triangle indices exceed configured archive budget.")
                     local indices = buffer.create(indexBytes)
-                    local scratch = buffer.create(40)
-                    local vertexData, byVertex = {}, {}
-                    local vertexCount = 0
+                    local scratch, preciseColor = buffer.create(40), buffer.create(16)
+                    local vertexData, colorData, byVertex = {}, {}, {}
+                    local vertexCount, needsPreciseColor = 0, false
                     for faceIndex, face in ipairs(faces) do
                         local vertices = editable:GetFaceVertices(face)
                         local normals = editable:GetFaceNormals(face)
                         local uvs = editable:GetFaceUVs(face)
                         local colorsOK, colors = pcall(function() return editable:GetFaceColors(face) end)
                         requireThat(#vertices == 3 and #normals == 3 and #uvs == 3, "MESH_COPY: incomplete face attributes.")
+                        requireThat(colorsOK and colors, "MESH_COPY: vertex colors could not be read; refusing a white substitute.")
                         for corner = 1, 3 do
                             local position = editable:GetPosition(vertices[corner])
                             local normal = editable:GetNormal(normals[corner])
@@ -1307,29 +1320,38 @@ local function copyRenderMeshes(root, snapshot)
                                 requireThat(value == value and math.abs(value) < 1e10, "MESH_COPY: invalid numeric vertex data.")
                                 buffer.writef32(scratch, (axis-1)*4, value)
                             end
-                            for channel = 36, 39 do buffer.writeu8(scratch, channel, 255) end
-                            if colorsOK and colors and colors[corner] then
+                            local rgba = {1, 1, 1, 1}
+                            if colors[corner] then
                                 local color = editable:GetColor(colors[corner])
                                 local alpha = editable:GetColorAlpha(colors[corner]) or 1
-                                for channel, value in ipairs({color.R,color.G,color.B,alpha}) do
-                                    buffer.writeu8(scratch, 35 + channel, math.floor(math.clamp(value,0,1)*255+.5))
-                                end
+                                rgba = {color.R, color.G, color.B, alpha}
+                            end
+                            for channel, value in ipairs(rgba) do
+                                requireThat(value == value and math.abs(value) < 1e10, "MESH_COPY: invalid vertex color.")
+                                buffer.writef32(preciseColor, (channel-1)*4, value)
+                                local byte = math.floor(math.clamp(value,0,1)*255+.5)
+                                buffer.writeu8(scratch, 35 + channel, byte)
+                                if math.abs(value - byte/255) > 0.000001 then needsPreciseColor = true end
                             end
                             local encoded = buffer.tostring(scratch)
-                            local index = byVertex[encoded]
+                            local exact = buffer.tostring(preciseColor)
+                            local key = encoded .. exact
+                            local index = byVertex[key]
                             if index == nil then
-                                requireThat(37 + indexBytes + (vertexCount+1)*40 + total <= CONFIG.MaxSurfaceBytes,
+                                requireThat(37 + indexBytes + (vertexCount+1)*(needsPreciseColor and 56 or 40) + total <= CONFIG.MaxSurfaceBytes,
                                     "MESH_COPY_BUDGET: indexed original surfaces exceed configured archive budget.")
                                 index = vertexCount
                                 vertexCount = vertexCount + 1
-                                byVertex[encoded] = index
+                                byVertex[key] = index
                                 table.insert(vertexData, encoded)
+                                table.insert(colorData, exact)
                             end
                             buffer.writeu32(indices, ((faceIndex-1)*3+corner-1)*4, index)
                         end
                         if faceIndex % 100 == 0 then task.wait() end
                     end
-                    local bytes = 37 + vertexCount*40 + indexBytes
+                    local bytes = 37 + vertexCount*(needsPreciseColor and 56 or 40) + indexBytes
+                    requireThat(bytes + total <= CONFIG.MaxSurfaceBytes, "MESH_COPY_BUDGET: exact vertex colors exceed configured archive budget.")
                     local header = buffer.create(37)
                     buffer.writestring(header, 0, "version 4.00\n")
                     buffer.writeu16(header, 13, 24)
@@ -1338,6 +1360,9 @@ local function copyRenderMeshes(root, snapshot)
                     local data = buffer.tostring(header) .. table.concat(vertexData) .. buffer.tostring(indices)
                     byVertex, vertexData = nil, nil
                     table.insert(files, {name = "assets/meshes/" .. id .. ".mesh", data = data})
+                    if needsPreciseColor then
+                        table.insert(files, {name = "assets/meshes/" .. id .. ".colors.f32", data = table.concat(colorData)})
+                    end
                     total = total + bytes
                     log("INFO", "Original mesh copied: " .. id .. "; " .. #faces .. " triangles, " .. vertexCount .. " unique vertices, normals + UVs; " .. bytes .. " bytes (" .. string.format("%.1f", 100*(1-bytes/(37+#faces*132))) .. "% smaller).")
                 end)
@@ -1354,22 +1379,52 @@ local function copyRenderMeshes(root, snapshot)
         end
     end
     requireThat(#failures == 0, "RENDER_MESH_INCOMPLETE: " .. #failures .. " render meshes unavailable. MeshPart and SpecialMesh geometry are both required; no box substitute will be uploaded. See ORIGINAL_MESH_UNAVAILABLE above.")
-    snapshot.renderMeshCopy = {copied = #files, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh-indexed", preservesNormals = true, preservesUVs = true}
+    local copied = 0
+    for _, file in ipairs(files) do if file.name:match("%.mesh$") then copied = copied + 1 end end
+    snapshot.renderMeshCopy = {copied = copied, bytes = total, failures = failures, complete = #failures == 0, method = "engine-editable-mesh-indexed", preservesNormals = true, preservesUVs = true, preservesVertexColors = true, preservesVertexAlpha = true, preciseColorSidecars = true}
     snapshot.embeddedAssetBinaries = #files > 0
     return files
 end
 
 local function captureRendering(root)
     local lighting = game:GetService("Lighting")
-    local result = {schema = "pet-rendering-v1", lighting = {}, effects = {}, parts = {}, colorSource = "storage-model-clone"}
+    local result = {schema = "pet-rendering-v1", revision = 2, lighting = {}, effects = {}, parts = {}, visuals = {}, colorSource = "storage-model-clone",
+        runtime = {dynamicLighting = true, nightClockMaximum = 6, onIsland = false, enableParticlesAndLights = true, rainbowPeriod = 4}}
+    local player = game:GetService("Players").LocalPlayer
+    result.runtime.onIsland = player and player:GetAttribute("OnIsland") == true or false
+    local function typed(value)
+        local kind = typeof(value)
+        if kind == "Color3" then return {type = kind, value = {value.R,value.G,value.B}}
+        elseif kind == "Vector3" then return {type = kind, value = {value.X,value.Y,value.Z}}
+        elseif kind == "EnumItem" then return {type = kind, value = value.Value}
+        elseif kind == "number" or kind == "boolean" or kind == "string" then return {type = kind, value = value} end
+    end
     local function captureParts(node, parentPath)
         local path = table.clone(parentPath)
         table.insert(path, node.Name)
         if node:IsA("BasePart") then
             local value = node.Color
             table.insert(result.parts, {path = path, class = node.ClassName,
-                color = {value.R, value.G, value.B}})
+                color = {value.R, value.G, value.B}, cframe = cframeArray(node.CFrame)})
         end
+        local owner = node
+        while owner and not owner:IsA("BasePart") do owner = owner.Parent end
+        local visual = {path = path, class = node.ClassName, values = {}, attributes = {}, ownerCFrame = owner and cframeArray(owner.CFrame) or nil}
+        local names = node:IsA("BasePart") and {"Color", "Material", "Transparency"}
+            or node:IsA("SpecialMesh") and {"VertexColor"}
+            or node:IsA("SurfaceAppearance") and {"Color", "AlphaMode"}
+            or node:IsA("Decal") and {"Color3", "Transparency"}
+            or node:IsA("Highlight") and {"Enabled", "FillColor", "FillTransparency", "OutlineColor", "OutlineTransparency", "DepthMode"}
+            or node:IsA("Light") and {"Enabled", "Color", "Brightness", "Range", "Angle", "Face"} or {}
+        for _, name in ipairs(names) do
+            local ok, value = pcall(function() return node[name] end)
+            if ok then visual.values[name] = typed(value) end
+        end
+        for _, name in ipairs({"Day", "Night", "Rainbow", "Animation"}) do
+            local value = node:GetAttribute(name)
+            if value ~= nil then visual.attributes[name] = typed(value) end
+        end
+        if next(visual.values) or next(visual.attributes) then table.insert(result.visuals, visual) end
         for _, child in ipairs(node:GetChildren()) do captureParts(child, path) end
         task.wait()
     end
@@ -1398,7 +1453,12 @@ local function captureRendering(root)
     end
     effects(lighting)
     effects(workspace.CurrentCamera)
-    log("INFO", #result.parts .. " direct storage-model colors, lighting exposure and " .. #result.effects .. " bloom/color effects recorded.")
+    local renderModule = game:GetService("ReplicatedStorage"):FindFirstChild("Client")
+    renderModule = renderModule and renderModule:FindFirstChild("PetRender")
+    renderModule = renderModule and renderModule:FindFirstChild("VisualPet")
+    result.runtime.customRig = renderModule and renderModule:FindFirstChild(CONFIG.PetName) ~= nil or false
+    if result.runtime.customRig then log("WARN", "CUSTOM_VISUAL_RIG: this pet has game-specific visual code; source assets are captured, live scripted changes require viewer support.") end
+    log("INFO", #result.parts .. " direct colors with transform identity, " .. #result.visuals .. " typed appearance records and " .. #result.effects .. " bloom/color effects recorded.")
     return result
 end
 
