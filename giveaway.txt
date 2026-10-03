@@ -23,6 +23,7 @@ local Remote = require(ReplicatedStorage.Shared.Framework.Network.Remote)
 local LocalData = require(ReplicatedStorage.Client.Framework.Services.LocalData)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local PetData = require(ReplicatedStorage.Shared.Data.Pets)
+local TradingPlazaShared = require(ReplicatedStorage.Shared.Utils.TradingPlazaShared)
 local environment = type(getgenv) == "function" and getgenv() or _G
 local previous = environment.BGSI_GIVEAWAY
 if previous and previous.running then
@@ -37,9 +38,12 @@ local activeTrade
 local pendingRequest
 local policy
 local policyBusy = false
+local nextPolicyAt = 0
 local teleportTarget
 local teleportRetryAt = 0
-local nextRouteAt = 0
+local routeReady = false
+local resumeQueued = false
+local nextRouteAt = os.clock() + 0.5
 local nextInventoryAt = 0
 local inventoryRetry = 0
 local headers = { ["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. AUTH_KEY }
@@ -90,7 +94,8 @@ local function api(method, path, payload, transactionId)
     end
     local status = type(response) == "table" and tonumber(response.StatusCode)
     if not status or status < 200 or status >= 300 then
-        warn("[Giveaway] " .. path .. " returned status " .. tostring(status))
+        local details = type(response) == "table" and type(response.Body) == "string" and redact(response.Body):sub(1, 1800) or ""
+        warn("[Giveaway] " .. path .. " returned status " .. tostring(status) .. ": " .. details)
         return nil
     end
     if method ~= "GET" then
@@ -176,7 +181,7 @@ local function normalizeAssignments(value)
 end
 
 local function refreshPolicy()
-    if policyBusy then return false end
+    if not routeReady or policyBusy then return false end
     policyBusy = true
     local allowedBody = api("GET", "/api/allowed-users")
     local assignmentsBody = api("GET", "/api/pet-assignments")
@@ -184,14 +189,20 @@ local function refreshPolicy()
     local assignments = assignmentsBody and normalizeAssignments(assignmentsBody)
     if bot.running then
         policy = allowed and assignments and {allowed = allowed, assignments = assignments, time = os.clock()} or nil
-        if not policy then warn("[Giveaway] API policy unavailable or invalid; trades paused.") end
+        if not policy then
+            local reason = not allowedBody and "allowed-users request failed"
+                or not allowed and "allowed-users response must contain valid user_ids"
+                or not assignmentsBody and "pet-assignments request failed"
+                or "pet-assignments response must contain user_id and pet_ids"
+            warn("[Giveaway] Trades paused: " .. reason)
+        end
     end
     policyBusy = false
     return bot.running and policy ~= nil
 end
 
 local function hasPolicy()
-    return policy ~= nil and os.clock() - policy.time <= POLICY_INTERVAL + 5
+    return routeReady and policy ~= nil and os.clock() - policy.time <= POLICY_INTERVAL + 5
 end
 
 local function signature(ids)
@@ -446,8 +457,43 @@ local function antiAfk()
     end)
 end
 
+local function queueResume()
+    if resumeQueued then return end
+    local queue = queue_on_teleport or queueonteleport
+        or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if type(queue) ~= "function" then
+        log("After teleport, run the loader again if your executor does not auto-execute it.")
+        return
+    end
+    local loader = string.format(
+        'local source = game:HttpGet(%q .. "?v=" .. tostring(os.time())); local chunk, err = loadstring(source); assert(chunk, err); chunk({AUTH_KEY = %q})',
+        "https://raw.githubusercontent.com/blehsigmacoder123/bgsscript/main/giveaway.txt", AUTH_KEY
+    )
+    local ok, err = pcall(queue, loader)
+    if ok then resumeQueued = true else warn("[Giveaway] Could not queue restart: " .. redact(err)) end
+end
+
+local function enterProPlaza()
+    local data = LocalData:Get()
+    if not data then log("Waiting for game data before entering Pro plaza.") return end
+    if not TradingPlazaShared:HasProAccess(data) then
+        warn("[Giveaway] Pro plaza access requirements are not met; APIs remain paused.")
+        return
+    end
+    routeReady = false
+    policy = nil
+    queueResume()
+    teleportTarget = {placeId = PRO_PLACE_ID, viaRemote = true}
+    teleportRetryAt = os.clock() + 30
+    log("Entering Pro plaza through the game's PlazaTeleport remote.")
+    fire("PlazaTeleport", "pro")
+end
+
 local function teleport(placeId, jobId)
-    if activeTrade or pendingRequest or #bot.transactions > 0 then return end
+    if activeTrade or pendingRequest or (routeReady and #bot.transactions > 0) then return end
+    routeReady = false
+    policy = nil
+    queueResume()
     teleportTarget = {placeId = placeId, jobId = jobId}
     teleportRetryAt = os.clock() + 60
     local ok, err = pcall(function()
@@ -464,7 +510,11 @@ local function teleport(placeId, jobId)
 end
 
 local function checkAndHop()
-    if activeTrade or pendingRequest or #bot.transactions > 0 then return false end
+    if activeTrade or pendingRequest or (routeReady and #bot.transactions > 0) then return false end
+    if game.PlaceId ~= PRO_PLACE_ID then
+        enterProPlaza()
+        return false
+    end
     local ok, body = pcall(function() return game:HttpGet(SERVER_API_URL) end)
     local decodedOk, decoded = false, nil
     if ok and type(body) == "string" then decodedOk, decoded = pcall(HttpService.JSONDecode, HttpService, body) end
@@ -488,12 +538,15 @@ local function checkAndHop()
     end)
     local target = ranked[1]
     if not target then
-        if game.PlaceId ~= NORMAL_PLACE_ID then teleport(NORMAL_PLACE_ID) end
+        routeReady = false
+        policy = nil
+        warn("[Giveaway] No valid Pro server list yet; APIs remain paused.")
         return false
     end
     if game.PlaceId == PRO_PLACE_ID and game.JobId == target.id then
         teleportTarget = nil
-        log("In the #1 most populated Pro plaza.")
+        routeReady = true
+        log("Verified #1 most populated Pro plaza; API workers can start.")
         return true
     end
     teleport(PRO_PLACE_ID, target.id)
@@ -501,6 +554,7 @@ local function checkAndHop()
 end
 
 local function postInventory()
+    if not routeReady then return false end
     local data = LocalData:Get()
     if not data or type(data.Pets) ~= "table" then return false end
     local inventory = {Pets = copy(data.Pets)}
@@ -555,7 +609,7 @@ end
 
 connect(LocalPlayer.Idled, antiAfk)
 connect(Remote.Event("TradeRequest"), function(player)
-    if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true then return end
+    if not routeReady or activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true then return end
     if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players then return end
     if not hasPolicy() or not policy.allowed[userId(player.UserId)] or #bot.transactions >= MAX_TRANSACTIONS then return end
     pendingRequest = {player = player, expires = os.clock() + 5}
@@ -573,7 +627,12 @@ connect(Players.PlayerRemoving, function(player)
 end)
 environment.BGSI_ROUTE_CHECK = checkAndHop
 loop(30, antiAfk)
-loop(POLICY_INTERVAL, refreshPolicy)
+loop(1, function()
+    if routeReady and not policyBusy and os.clock() >= nextPolicyAt then
+        nextPolicyAt = os.clock() + POLICY_INTERVAL
+        refreshPolicy()
+    end
+end)
 loop(0.25, function()
     local session = activeTrade
     if session and not session.state.Processing and os.clock() >= session.deadline then
@@ -589,6 +648,7 @@ loop(0.25, function()
     end
 end)
 loop(1, function()
+    if not routeReady then return end
     local entry = bot.transactions[1]
     if entry and os.clock() >= entry.nextAttempt then
         local sent = api("POST", "/api/transactions", entry.payload, entry.payload.transactionId)
@@ -613,12 +673,18 @@ loop(1, function()
     end
 end)
 loop(1, function()
-    if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true or #bot.transactions > 0 then return end
+    if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true
+        or (routeReady and #bot.transactions > 0) then return end
     if teleportTarget then
-        if os.clock() >= teleportRetryAt then teleport(teleportTarget.placeId, teleportTarget.jobId) end
+        if teleportTarget.viaRemote and game.PlaceId == PRO_PLACE_ID then teleportTarget = nil end
+        if teleportTarget and os.clock() >= teleportRetryAt then
+            if teleportTarget.viaRemote then enterProPlaza()
+            else teleport(teleportTarget.placeId, teleportTarget.jobId) end
+        end
     elseif os.clock() >= nextRouteAt then
-        nextRouteAt = os.clock() + (checkAndHop() and 900 or 60)
+        local correct = checkAndHop()
+        nextRouteAt = os.clock() + (correct and 900 or 15)
     end
 end)
-log("Giveaway bot running.")
+log("Giveaway bot starting: verifying Pro plaza before API requests.")
 return bot
