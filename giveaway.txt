@@ -1,5 +1,5 @@
 local BGSI = ...
-local API_URL = "https://51.77.216.96:8446"
+local API_URL = "https://gw.bgsi.io"
 local AUTH_KEY = type(BGSI) == "table" and BGSI.AUTH_KEY
 assert(type(AUTH_KEY) == "string" and AUTH_KEY ~= "", "Giveaway: pass AUTH_KEY through the loader.")
 local PRO_PLACE_ID = 127738893422250
