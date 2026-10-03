@@ -1,0 +1,624 @@
+local BGSI = ...
+local API_URL = "https://51.77.216.96:8446"
+local AUTH_KEY = type(BGSI) == "table" and BGSI.AUTH_KEY
+assert(type(AUTH_KEY) == "string" and AUTH_KEY ~= "", "Giveaway: pass AUTH_KEY through the loader.")
+local PRO_PLACE_ID = 127738893422250
+local NORMAL_PLACE_ID = 85896571713843
+local SERVER_API_URL = "http://51.77.216.96:4564/" .. PRO_PLACE_ID
+local POLICY_INTERVAL = 10
+local INVENTORY_INTERVAL = 600
+local MAX_TRANSACTIONS = 100
+repeat task.wait() until game:IsLoaded()
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:GetService("VirtualUser")
+repeat task.wait() until Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+local HttpRequest = (syn and syn.request) or (http and http.request) or http_request
+    or (fluxus and fluxus.request) or request
+assert(type(HttpRequest) == "function", "Giveaway: no supported HTTP request function.")
+local Remote = require(ReplicatedStorage.Shared.Framework.Network.Remote)
+local LocalData = require(ReplicatedStorage.Client.Framework.Services.LocalData)
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local PetData = require(ReplicatedStorage.Shared.Data.Pets)
+local environment = type(getgenv) == "function" and getgenv() or _G
+local previous = environment.BGSI_GIVEAWAY
+if previous and previous.running then
+    warn("[Giveaway] Already running. Call BGSI_GIVEAWAY.Stop() before restarting.")
+    return previous
+end
+local bot = {running = true, transactions = previous and previous.transactions or {}}
+environment.BGSI_GIVEAWAY = bot
+local connections = {}
+local threads = {}
+local activeTrade
+local pendingRequest
+local policy
+local policyBusy = false
+local teleportTarget
+local teleportRetryAt = 0
+local nextRouteAt = 0
+local nextInventoryAt = 0
+local inventoryRetry = 0
+local headers = { ["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. AUTH_KEY }
+
+local function log(...)
+    print("[Giveaway]", ...)
+end
+
+local function redact(value)
+    return tostring(value):gsub(AUTH_KEY, "[redacted]")
+end
+
+local function copy(value, seen)
+    if typeof(value) == "Instance" then
+        return value:GetFullName()
+    end
+    if type(value) ~= "table" then
+        return value
+    end
+    seen = seen or {}
+    if seen[value] then
+        return "<cycle>"
+    end
+    seen[value] = true
+    local result = {}
+    for key, item in pairs(value) do
+        result[key] = copy(item, seen)
+    end
+    seen[value] = nil
+    return result
+end
+
+local function api(method, path, payload, transactionId)
+    local ok, response = pcall(function()
+        local requestHeaders = table.clone(headers)
+        if transactionId then
+            requestHeaders["Idempotency-Key"] = transactionId
+        end
+        local options = {Url = API_URL .. path, Method = method, Headers = requestHeaders, Timeout = 15}
+        if payload then
+            options.Body = HttpService:JSONEncode(payload)
+        end
+        return HttpRequest(options)
+    end)
+    if not ok then
+        warn("[Giveaway] " .. path .. " failed: " .. redact(response))
+        return nil
+    end
+    local status = type(response) == "table" and tonumber(response.StatusCode)
+    if not status or status < 200 or status >= 300 then
+        warn("[Giveaway] " .. path .. " returned status " .. tostring(status))
+        return nil
+    end
+    if method ~= "GET" then
+        return true
+    end
+    local decodedOk, decoded = pcall(HttpService.JSONDecode, HttpService, response.Body)
+    if not decodedOk or type(decoded) ~= "table" then
+        warn("[Giveaway] " .. path .. " did not return a JSON object or array.")
+        return nil
+    end
+    return decoded
+end
+
+local function userId(value)
+    local id = tonumber(value)
+    if id and id > 0 and id < math.huge and id % 1 == 0 then
+        return string.format("%.0f", id)
+    end
+    return nil
+end
+
+local function unwrap(value, names)
+    for _, name in ipairs(names) do
+        if value[name] ~= nil then
+            return value[name]
+        end
+    end
+    return value
+end
+
+local function normalizeAllowed(value)
+    value = unwrap(value, {"allowedUsers", "allowed_users", "userIds", "users", "data"})
+    if type(value) ~= "table" then return nil end
+    local result = {}
+    for key, entry in pairs(value) do
+        local id
+        if type(entry) == "boolean" then
+            id = userId(key)
+            if not id then return nil end
+            if entry then result[id] = true end
+        else
+            id = userId(type(entry) == "table" and (entry.userId or entry.userid or entry.UserId) or entry)
+            if not id then return nil end
+            result[id] = true
+        end
+    end
+    return result
+end
+
+local function petIds(value)
+    if type(value) == "table" then
+        value = value.petIds or value.pet_ids or value.pets or value.petId or value.pet_id or value
+    end
+    if type(value) == "string" or type(value) == "number" then value = {value} end
+    if type(value) ~= "table" or #value == 0 then return nil end
+    local result = {}
+    local count = 0
+    for key, entry in pairs(value) do
+        if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #value then return nil end
+        if type(entry) == "table" then entry = entry.petId or entry.pet_id or entry.Id or entry.id end
+        if (type(entry) ~= "string" and type(entry) ~= "number") or tostring(entry) == "" then return nil end
+        count = count + 1
+        result[key] = tostring(entry)
+    end
+    if count ~= #value then return nil end
+    table.sort(result)
+    return result
+end
+
+local function normalizeAssignments(value)
+    value = unwrap(value, {"assignments", "petAssignments", "pet_assignments", "data"})
+    if type(value) ~= "table" then return nil end
+    local result = {}
+    for key, entry in pairs(value) do
+        local id = userId(type(entry) == "table" and (entry.userId or entry.userid or entry.UserId) or key)
+        local pets = petIds(entry)
+        if not id or not pets then return nil end
+        result[id] = result[id] or {}
+        for _, pet in ipairs(pets) do table.insert(result[id], pet) end
+        table.sort(result[id])
+    end
+    return result
+end
+
+local function refreshPolicy()
+    if policyBusy then return false end
+    policyBusy = true
+    local allowedBody = api("GET", "/api/allowed-users")
+    local assignmentsBody = api("GET", "/api/pet-assignments")
+    local allowed = allowedBody and normalizeAllowed(allowedBody)
+    local assignments = assignmentsBody and normalizeAssignments(assignmentsBody)
+    if bot.running then
+        policy = allowed and assignments and {allowed = allowed, assignments = assignments, time = os.clock()} or nil
+        if not policy then warn("[Giveaway] API policy unavailable or invalid; trades paused.") end
+    end
+    policyBusy = false
+    return bot.running and policy ~= nil
+end
+
+local function hasPolicy()
+    return policy ~= nil and os.clock() - policy.time <= POLICY_INTERVAL + 5
+end
+
+local function signature(ids)
+    return HttpService:JSONEncode(ids or {})
+end
+
+local function ownAndOther(trade)
+    if type(trade) ~= "table" or type(trade.Party0) ~= "table" or type(trade.Party1) ~= "table" then return nil end
+    if trade.Party0.Player == LocalPlayer then return trade.Party0, trade.Party1 end
+    if trade.Party1.Player == LocalPlayer then return trade.Party1, trade.Party0 end
+    return nil
+end
+
+local function fire(name, ...)
+    local ok, err = pcall(Remote.FireServer, Remote, name, ...)
+    if not ok then warn("[Giveaway] " .. name .. " failed: " .. redact(err)) end
+    return ok
+end
+
+local function cancelTrade(reason)
+    local session = activeTrade
+    if not session then return end
+    if not session.cancelled then
+        session.cancelled = true
+        log("Cancelling trade:", reason)
+    end
+    if os.clock() - (session.lastDecline or 0) >= 2 then
+        session.lastDecline = os.clock()
+        fire("TradeDecline")
+    end
+end
+
+local function findPet(party, id)
+    for _, pet in ipairs(party.Inventory and party.Inventory.Pets or {}) do
+        if tostring(pet.Id) == id then return pet end
+    end
+    return nil
+end
+
+local function basePetId(id)
+    return tostring(id):match("^([^:]+)")
+end
+
+local function offerIds(party)
+    local ids = {}
+    for _, item in ipairs(party.Offer or {}) do
+        if item.Type ~= "Pet" or not item.Id then return nil end
+        table.insert(ids, basePetId(item.Id))
+    end
+    table.sort(ids)
+    return ids
+end
+
+local function offeredPets(party)
+    local result = {}
+    for _, item in ipairs(party.Offer or {}) do
+        if item.Type == "Pet" then
+            local pet = findPet(party, basePetId(item.Id))
+            if not pet then return nil end
+            local record = copy(pet)
+            record.Amount = 1
+            record.Type = "Pet"
+            record.offerId = item.Id
+            table.insert(result, record)
+        end
+    end
+    return result
+end
+
+local function assignedOfferId(pet, occurrence)
+    if (pet.Amount or 1) <= 1 then return tostring(pet.Id) .. ":0" end
+    local rarity = PetData[pet.Name] and PetData[pet.Name].Rarity
+    local minimum = Constants.VisualStackMinSize and Constants.VisualStackMinSize[rarity]
+    if minimum and pet.Amount > minimum then return tostring(pet.Id) .. ":stack" end
+    return tostring(pet.Id) .. ":" .. occurrence
+end
+
+local function safeSession(session)
+    if session ~= activeTrade or session.cancelled or not hasPolicy() then return false end
+    local own, other = ownAndOther(session.state)
+    if not own or other.Player ~= session.player or session.player.Parent ~= Players then return false end
+    local id = userId(session.player.UserId)
+    if not policy.allowed[id] then return false end
+    return signature(policy.assignments[id]) == session.assignmentSignature
+end
+
+local function tickTrade()
+    local session = activeTrade
+    if not session then return end
+    if session.cancelled then cancelTrade("awaiting cancellation") return end
+    if not session.initialized then
+        if policyBusy then return end
+        if not refreshPolicy() or session ~= activeTrade then return end
+        local id = userId(session.player.UserId)
+        if not policy.allowed[id] then cancelTrade("user is not allowed") return end
+        session.assignments = policy.assignments[id]
+        session.assignmentSignature = signature(session.assignments)
+        session.mode = session.assignments and "giveaway" or "deposit"
+        session.initialized = true
+        log("Started", session.mode, "with", session.player.Name, session.player.UserId)
+    end
+    if not hasPolicy() then
+        if os.clock() >= session.deadline then cancelTrade("authorization unavailable before deadline") end
+        return
+    end
+    if not safeSession(session) then cancelTrade("recipient or assignments changed") return end
+    local own, other = ownAndOther(session.state)
+    if session.mode == "deposit" and (other.Accepted or session.readySeen)
+        and not session.extended and os.clock() < session.deadline then
+        session.extended = true
+        session.deadline = session.startedAt + 70
+        log("Deposit countdown extended once to 70 seconds total.")
+    end
+    if session.state.Processing then return end
+    if os.clock() >= session.deadline then cancelTrade("trade countdown expired") return end
+    local ownIds = offerIds(own)
+    local otherIds = offerIds(other)
+    if not ownIds or not otherIds then cancelTrade("only pet offers are supported") return end
+    if session.mode == "deposit" then
+        if #ownIds > 0 then cancelTrade("deposit would send items") return end
+        if #otherIds == 0 or not other.Accepted then return end
+    else
+        if #otherIds > 0 then cancelTrade("giveaway recipient offered items") return end
+        local expected = {}
+        for _, id in ipairs(session.assignments) do
+            expected[id] = (expected[id] or 0) + 1
+        end
+        if #session.assignments > Constants.TradingSlots then cancelTrade("assignment exceeds trade slots") return end
+        local offered = {}
+        for _, id in ipairs(ownIds) do
+            offered[id] = (offered[id] or 0) + 1
+            if not expected[id] or offered[id] > expected[id] then cancelTrade("unassigned pet in offer") return end
+        end
+        for _, id in ipairs(session.assignments) do
+            local pet = findPet(own, id)
+            if not pet or (pet.Amount or 1) < expected[id] then cancelTrade("assigned pet is missing") return end
+            if (offered[id] or 0) < expected[id] then
+                if own.Accepted then cancelTrade("incomplete accepted giveaway offer") return end
+                if os.clock() - session.lastAction >= 1 then
+                    session.lastAction = os.clock()
+                    fire("TradeAddPet", assignedOfferId(pet, (offered[id] or 0) + 1))
+                end
+                return
+            end
+        end
+        if signature(ownIds) ~= session.assignmentSignature then return end
+    end
+    local fingerprint = signature(ownIds) .. "/" .. signature(otherIds)
+    if session.acceptedFingerprint and session.acceptedFingerprint ~= fingerprint then
+        session.acceptedFingerprint = nil
+        session.confirmedFingerprint = nil
+    end
+    if os.clock() - session.lastAction < 1 then return end
+    if not own.Accepted then
+        session.lastAction = os.clock()
+        session.acceptedFingerprint = fingerprint
+        fire("TradeAccept")
+        return
+    end
+    if not other.Accepted or own.Confirmed then return end
+    if type(session.state.Timer) ~= "number" or workspace:GetServerTimeNow() < session.state.Timer + 0.2 then return end
+    if policyBusy then return end
+    local revision = session.revision
+    if not refreshPolicy() or not safeSession(session) then
+        if session == activeTrade then cancelTrade("final authorization failed") end
+        return
+    end
+    if revision ~= session.revision then return end
+    own, other = ownAndOther(session.state)
+    if not own.Accepted or not other.Accepted or session.state.Processing then return end
+    if os.clock() >= session.deadline then cancelTrade("trade countdown expired") return end
+    local received = offeredPets(other)
+    local sent = offeredPets(own)
+    if not received or not sent then cancelTrade("cannot resolve offered pets") return end
+    session.received = received
+    session.sent = sent
+    session.confirmedFingerprint = fingerprint
+    session.lastAction = os.clock()
+    fire("TradeConfirm")
+end
+
+local function updateTrade(state, started)
+    local own, other = ownAndOther(state)
+    if not own or typeof(other.Player) ~= "Instance" or not other.Player:IsA("Player") then
+        if activeTrade then cancelTrade("invalid trade state") else fire("TradeDecline") end
+        return
+    end
+    local previousOwn, previousOther
+    if activeTrade then previousOwn, previousOther = ownAndOther(activeTrade.state) end
+    local ownCopy, otherCopy = table.clone(own), table.clone(other)
+    ownCopy.Offer, otherCopy.Offer = copy(own.Offer or {}), copy(other.Offer or {})
+    ownCopy.Inventory = own.Inventory or (previousOwn and previousOwn.Inventory)
+    otherCopy.Inventory = other.Inventory or (previousOther and previousOther.Inventory)
+    local snapshot = {Party0 = ownCopy, Party1 = otherCopy, Timer = state.Timer, Processing = state.Processing}
+    pendingRequest = nil
+    if started then
+        if activeTrade then cancelTrade("overlapping trade") return end
+        local startedAt = os.clock()
+        activeTrade = {
+            player = other.Player, startedAt = startedAt, deadline = startedAt + 60,
+            state = snapshot, revision = 1, lastAction = -math.huge,
+            transactionId = HttpService:GenerateGUID(false)
+        }
+        if #bot.transactions >= MAX_TRANSACTIONS then cancelTrade("transaction backlog is full") end
+    elseif activeTrade then
+        if other.Player ~= activeTrade.player then cancelTrade("trade partner changed") return end
+        activeTrade.state = snapshot
+        activeTrade.revision = activeTrade.revision + 1
+    end
+    if activeTrade and other.Accepted and os.clock() < activeTrade.deadline then
+        activeTrade.readySeen = true
+        if activeTrade.mode == "deposit" and not activeTrade.extended then
+            activeTrade.extended = true
+            activeTrade.deadline = activeTrade.startedAt + 70
+        end
+    end
+end
+
+local function onTradeEnded(result)
+    local session = activeTrade
+    activeTrade = nil
+    pendingRequest = nil
+    if not session then return end
+    log("Trade ended:", result)
+    if result ~= "success" then return end
+    local own, other = ownAndOther(session.state)
+    local received = offeredPets(other) or session.received
+    local sent = offeredPets(own) or session.sent
+    if not received or not sent then
+        warn("[Giveaway] Completed trade could not be resolved; pausing bot.")
+        bot.Stop()
+        return
+    end
+    local payload = {
+        type = session.mode or "trade", transactionId = session.transactionId,
+        time = os.time(), timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        placeId = game.PlaceId, jobId = game.JobId, botUserId = LocalPlayer.UserId,
+        sender = {userId = session.player.UserId, username = session.player.Name},
+        recipient = {userId = LocalPlayer.UserId, username = LocalPlayer.Name},
+        pets = received, payout = sent
+    }
+    if session.mode == "giveaway" then
+        payload.sender, payload.recipient = payload.recipient, payload.sender
+    end
+    table.insert(bot.transactions, {payload = payload, attempts = 0, nextAttempt = 0})
+end
+
+local function antiAfk()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0, 0))
+    end)
+end
+
+local function teleport(placeId, jobId)
+    if activeTrade or pendingRequest or #bot.transactions > 0 then return end
+    teleportTarget = {placeId = placeId, jobId = jobId}
+    teleportRetryAt = os.clock() + 60
+    local ok, err = pcall(function()
+        if jobId then
+            TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+        else
+            TeleportService:Teleport(placeId, LocalPlayer)
+        end
+    end)
+    if not ok then
+        teleportRetryAt = os.clock() + 15
+        warn("[Giveaway] Teleport failed: " .. redact(err))
+    end
+end
+
+local function checkAndHop()
+    if activeTrade or pendingRequest or #bot.transactions > 0 then return false end
+    local ok, body = pcall(function() return game:HttpGet(SERVER_API_URL) end)
+    local decodedOk, decoded = false, nil
+    if ok and type(body) == "string" then decodedOk, decoded = pcall(HttpService.JSONDecode, HttpService, body) end
+    local servers = decodedOk and type(decoded) == "table" and decoded.data
+    local ranked = {}
+    if type(servers) == "table" then
+        for _, server in ipairs(servers) do
+            if type(server) == "table" and type(server.id) == "string" and server.id ~= "" then
+                table.insert(ranked, server)
+            end
+        end
+    end
+    table.sort(ranked, function(a, b)
+        local aPlaying, bPlaying = tonumber(a.playing) or 0, tonumber(b.playing) or 0
+        if aPlaying == bPlaying then
+            if a.id == game.JobId then return true end
+            if b.id == game.JobId then return false end
+            return a.id < b.id
+        end
+        return aPlaying > bPlaying
+    end)
+    local target = ranked[1]
+    if not target then
+        if game.PlaceId ~= NORMAL_PLACE_ID then teleport(NORMAL_PLACE_ID) end
+        return false
+    end
+    if game.PlaceId == PRO_PLACE_ID and game.JobId == target.id then
+        teleportTarget = nil
+        log("In the #1 most populated Pro plaza.")
+        return true
+    end
+    teleport(PRO_PLACE_ID, target.id)
+    return false
+end
+
+local function postInventory()
+    local data = LocalData:Get()
+    if not data or type(data.Pets) ~= "table" then return false end
+    local inventory = {Pets = copy(data.Pets)}
+    for _, key in ipairs({"Potions", "Powerups", "FishInventory", "RodInventory", "BaitInventory"}) do
+        if data[key] ~= nil then inventory[key] = copy(data[key]) end
+    end
+    return api("POST", "/api/inventory", {
+        type = "inventory", time = os.time(), timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        placeId = game.PlaceId, jobId = game.JobId,
+        profile = {userid = LocalPlayer.UserId, username = LocalPlayer.Name, displayname = LocalPlayer.DisplayName},
+        inventory = inventory
+    }) == true
+end
+
+local function connect(signal, callback)
+    table.insert(connections, signal:Connect(function(...)
+        if not bot.running then return end
+        local ok, err = pcall(callback, ...)
+        if not ok then
+            warn("[Giveaway] Event failed: " .. redact(err))
+            cancelTrade("event handling error")
+        end
+    end))
+end
+
+local function loop(interval, callback)
+    table.insert(threads, task.spawn(function()
+        while bot.running do
+            local ok, err = pcall(callback)
+            if not ok then warn("[Giveaway] Worker failed: " .. redact(err)) end
+            task.wait(interval)
+        end
+    end))
+end
+
+function bot.Stop()
+    if not bot.running then return end
+    bot.running = false
+    if activeTrade and not activeTrade.state.Processing then fire("TradeDecline") end
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    for _, thread in ipairs(threads) do
+        if thread ~= coroutine.running() then pcall(task.cancel, thread) end
+    end
+    table.clear(connections)
+    table.clear(threads)
+    if environment.BGSI_ROUTE_CHECK == checkAndHop then environment.BGSI_ROUTE_CHECK = nil end
+    activeTrade = nil
+    pendingRequest = nil
+    policy = nil
+    log("Stopped. Unsent transactions retained for restart in this client.")
+end
+
+connect(LocalPlayer.Idled, antiAfk)
+connect(Remote.Event("TradeRequest"), function(player)
+    if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true then return end
+    if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players then return end
+    if not hasPolicy() or not policy.allowed[userId(player.UserId)] or #bot.transactions >= MAX_TRANSACTIONS then return end
+    pendingRequest = {player = player, expires = os.clock() + 5}
+    if not fire("TradeAcceptRequest", player) then pendingRequest = nil end
+end)
+connect(Remote.Event("TradeStarted"), function(state) updateTrade(state, true) end)
+connect(Remote.Event("TradeUpdated"), function(state) updateTrade(state, false) end)
+connect(Remote.Event("TradeEnded"), onTradeEnded)
+connect(TeleportService.TeleportInitFailed, function(player)
+    if player == LocalPlayer and teleportTarget then teleportRetryAt = os.clock() + 15 end
+end)
+connect(Players.PlayerRemoving, function(player)
+    if activeTrade and activeTrade.player == player then cancelTrade("partner left") end
+    if pendingRequest and pendingRequest.player == player then pendingRequest = nil end
+end)
+environment.BGSI_ROUTE_CHECK = checkAndHop
+loop(30, antiAfk)
+loop(POLICY_INTERVAL, refreshPolicy)
+loop(0.25, function()
+    local session = activeTrade
+    if session and not session.state.Processing and os.clock() >= session.deadline then
+        cancelTrade("trade countdown expired")
+    end
+end)
+loop(0.25, function()
+    if pendingRequest and os.clock() >= pendingRequest.expires then pendingRequest = nil end
+    local ok, err = pcall(tickTrade)
+    if not ok then
+        warn("[Giveaway] Trade processing failed: " .. redact(err))
+        cancelTrade("trade processing error")
+    end
+end)
+loop(1, function()
+    local entry = bot.transactions[1]
+    if entry and os.clock() >= entry.nextAttempt then
+        local sent = api("POST", "/api/transactions", entry.payload, entry.payload.transactionId)
+        if not bot.running then return end
+        if sent then
+            table.remove(bot.transactions, 1)
+            log("Transaction saved:", entry.payload.transactionId)
+        else
+            entry.attempts = math.min(entry.attempts + 1, 6)
+            entry.nextAttempt = os.clock() + math.min(2 ^ entry.attempts, 60)
+        end
+    end
+    if os.clock() >= nextInventoryAt then
+        if postInventory() then
+            inventoryRetry = 0
+            nextInventoryAt = os.clock() + INVENTORY_INTERVAL
+            log("Entire inventory snapshot saved.")
+        else
+            inventoryRetry = math.min(inventoryRetry + 1, 6)
+            nextInventoryAt = os.clock() + math.min(2 ^ inventoryRetry, 60)
+        end
+    end
+end)
+loop(1, function()
+    if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true or #bot.transactions > 0 then return end
+    if teleportTarget then
+        if os.clock() >= teleportRetryAt then teleport(teleportTarget.placeId, teleportTarget.jobId) end
+    elseif os.clock() >= nextRouteAt then
+        nextRouteAt = os.clock() + (checkAndHop() and 900 or 60)
+    end
+end)
+log("Giveaway bot running.")
+return bot
