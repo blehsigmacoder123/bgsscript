@@ -122,7 +122,7 @@ local function unwrap(value, names)
 end
 
 local function normalizeAllowed(value)
-    value = unwrap(value, {"allowedUsers", "allowed_users", "userIds", "users", "data"})
+    value = unwrap(value, {"allowedUsers", "allowed_users", "userIds", "user_ids", "users", "data"})
     if type(value) ~= "table" then return nil end
     local result = {}
     for key, entry in pairs(value) do
@@ -132,7 +132,7 @@ local function normalizeAllowed(value)
             if not id then return nil end
             if entry then result[id] = true end
         else
-            id = userId(type(entry) == "table" and (entry.userId or entry.userid or entry.UserId) or entry)
+            id = userId(type(entry) == "table" and (entry.userId or entry.user_id or entry.userid or entry.UserId) or entry)
             if not id then return nil end
             result[id] = true
         end
@@ -165,7 +165,7 @@ local function normalizeAssignments(value)
     if type(value) ~= "table" then return nil end
     local result = {}
     for key, entry in pairs(value) do
-        local id = userId(type(entry) == "table" and (entry.userId or entry.userid or entry.UserId) or key)
+        local id = userId(type(entry) == "table" and (entry.userId or entry.user_id or entry.userid or entry.UserId) or key)
         local pets = petIds(entry)
         if not id or not pets then return nil end
         result[id] = result[id] or {}
