@@ -1,6 +1,6 @@
 local CONFIG = {
     PetName = "",
-    OnlyPet = "Dark Infernal",
+    OnlyPet = "Danger of the Abyss",
     Variants = (getgenv and getgenv() or _G).ASSET_EXPORT_VARIANTS or {"Normal"},
     QueueDelay = 2,
     Webhook = (getgenv and getgenv() or _G).ASSET_EXPORT_WEBHOOK or "",
@@ -1291,6 +1291,16 @@ local function captureVisualPrograms(root)
     module = module and module:FindFirstChild("VisualPet")
     if module and module:FindFirstChild(name) and not supported then
         table.insert(result.unsupported, "Custom VisualPet module has no portable recipe: " .. name)
+    end
+    if table.find(paired, name) or name == "The Leviathan" then
+        requireThat(#result.unsupported == 0, "WING_ANIMATION_INCOMPLETE: " .. table.concat(result.unsupported, "; ") .. ". Nothing uploaded.")
+        local rig = result.programs[1]
+        requireThat(rig and rig.type == "pivot-rig" and #rig.groups >= 2,
+            "WING_ANIMATION_INCOMPLETE: both wing pivots are required. Nothing uploaded.")
+        for _, wing in ipairs(rig.groups) do
+            requireThat(#wing.members > 0, "WING_ANIMATION_INCOMPLETE: empty group " .. wing.id .. ". Nothing uploaded.")
+        end
+        log("INFO", "Verified " .. #rig.groups .. " wing/tail pivot groups with their original member transforms.")
     end
     log("INFO", #result.programs .. " shared visual programs captured; " .. #result.unsupported .. " unsupported custom behaviors.")
     for _, message in ipairs(result.unsupported) do log("WARN", "VISUAL_PROGRAM: " .. message) end
