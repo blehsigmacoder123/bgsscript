@@ -1529,8 +1529,8 @@ end
 
 local function captureRendering(root)
     local lighting = game:GetService("Lighting")
-    local result = {schema = "pet-rendering-v1", revision = 3, lighting = {}, effects = {}, parts = {}, visuals = {}, colorSource = "storage-model-clone",
-        colorSemantics = {colors = "sRGB", meshMultipliers = "linear", vertexColors = "sRGB", vertexAlpha = "linear", lighting = "sRGB-colors-linear-intensity"},
+    local result = {schema = "pet-rendering-v1", revision = 4, lighting = {}, effects = {}, parts = {}, visuals = {}, colorSource = "storage-model-clone",
+        colorSemantics = {colors = "sRGB", meshMultipliers = "linear", vertexColors = "linear", vertexAlpha = "linear", neonResponse = "native-power4", lighting = "sRGB-colors-linear-intensity"},
         runtime = {dynamicLighting = true, nightClockMaximum = 6, onIsland = false, enableParticlesAndLights = true, rainbowPeriod = 4}}
     local player = game:GetService("Players").LocalPlayer
     result.runtime.onIsland = player and player:GetAttribute("OnIsland") == true or false
