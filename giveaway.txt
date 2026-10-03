@@ -6,7 +6,6 @@ local PRO_PLACE_ID = 127738893422250
 local NORMAL_PLACE_ID = 85896571713843
 local SERVER_API_URL = "http://51.77.216.96:4564/" .. PRO_PLACE_ID
 local POLICY_INTERVAL = 10
-local INVENTORY_INTERVAL = 600
 local MAX_TRANSACTIONS = 100
 repeat task.wait() until game:IsLoaded()
 local Players = game:GetService("Players")
@@ -44,6 +43,7 @@ local teleportRetryAt = 0
 local routeReady = false
 local resumeQueued = false
 local nextRouteAt = os.clock() + 0.5
+local pendingInventoryPosts = 0
 local nextInventoryAt = 0
 local inventoryRetry = 0
 local inventorySnapshot
@@ -472,6 +472,8 @@ local function onTradeEnded(result)
         payload.sender, payload.recipient = payload.recipient, payload.sender
     end
     table.insert(bot.transactions, {payload = payload, attempts = 0, nextAttempt = 0})
+    pendingInventoryPosts = pendingInventoryPosts + 1
+    if pendingInventoryPosts == 1 then nextInventoryAt = os.clock() + 0.5 end
 end
 
 local function antiAfk()
@@ -514,7 +516,7 @@ local function enterProPlaza()
 end
 
 local function teleport(placeId, jobId)
-    if activeTrade or pendingRequest or (routeReady and #bot.transactions > 0) then return end
+    if activeTrade or pendingRequest or (routeReady and (#bot.transactions > 0 or pendingInventoryPosts > 0)) then return end
     routeReady = false
     policy = nil
     queueResume()
@@ -534,7 +536,7 @@ local function teleport(placeId, jobId)
 end
 
 local function checkAndHop()
-    if activeTrade or pendingRequest or (routeReady and #bot.transactions > 0) then return false end
+    if activeTrade or pendingRequest or (routeReady and (#bot.transactions > 0 or pendingInventoryPosts > 0)) then return false end
     if game.PlaceId ~= PRO_PLACE_ID then
         enterProPlaza()
         return false
@@ -692,10 +694,11 @@ loop(1, function()
             entry.nextAttempt = os.clock() + math.min(2 ^ entry.attempts, 60)
         end
     end
-    if os.clock() >= nextInventoryAt then
+    if pendingInventoryPosts > 0 and os.clock() >= nextInventoryAt then
         if postInventory() then
+            pendingInventoryPosts = pendingInventoryPosts - 1
             inventoryRetry = 0
-            nextInventoryAt = os.clock() + INVENTORY_INTERVAL
+            nextInventoryAt = os.clock() + 0.5
             log("Entire inventory snapshot saved.")
         else
             inventoryRetry = math.min(inventoryRetry + 1, 6)
@@ -705,7 +708,7 @@ loop(1, function()
 end)
 loop(1, function()
     if activeTrade or pendingRequest or LocalPlayer:GetAttribute("Trading") == true
-        or (routeReady and #bot.transactions > 0) then return end
+        or (routeReady and (#bot.transactions > 0 or pendingInventoryPosts > 0)) then return end
     if teleportTarget then
         if teleportTarget.viaRemote and game.PlaceId == PRO_PLACE_ID then teleportTarget = nil end
         if teleportTarget and os.clock() >= teleportRetryAt then
