@@ -46,6 +46,7 @@ local resumeQueued = false
 local nextRouteAt = os.clock() + 0.5
 local nextInventoryAt = 0
 local inventoryRetry = 0
+local inventorySnapshot
 local headers = { ["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. AUTH_KEY }
 
 local function log(...)
@@ -76,6 +77,29 @@ local function copy(value, seen)
     return result
 end
 
+local function responseDetails(response)
+    if type(response) ~= "table" or type(response.Body) ~= "string" then return "" end
+    local ok, body = pcall(HttpService.JSONDecode, HttpService, response.Body)
+    if ok and type(body) == "table" then
+        if type(body.detail) == "string" then return redact(body.detail):sub(1, 750) end
+        if type(body.detail) == "table" then
+            local errors = {}
+            for index, detail in ipairs(body.detail) do
+                if index > 8 then break end
+                if type(detail) == "table" then
+                    local location = {}
+                    for _, part in ipairs(type(detail.loc) == "table" and detail.loc or {}) do
+                        table.insert(location, tostring(part))
+                    end
+                    table.insert(errors, table.concat(location, ".") .. ": " .. tostring(detail.msg or detail.type or "Invalid value"))
+                end
+            end
+            if #errors > 0 then return redact(table.concat(errors, "; ")):sub(1, 750) end
+        end
+    end
+    return redact(response.Body):sub(1, 750)
+end
+
 local function api(method, path, payload, transactionId)
     local ok, response = pcall(function()
         local requestHeaders = table.clone(headers)
@@ -94,7 +118,7 @@ local function api(method, path, payload, transactionId)
     end
     local status = type(response) == "table" and tonumber(response.StatusCode)
     if not status or status < 200 or status >= 300 then
-        local details = type(response) == "table" and type(response.Body) == "string" and redact(response.Body):sub(1, 1800) or ""
+        local details = responseDetails(response)
         warn("[Giveaway] " .. path .. " returned status " .. tostring(status) .. ": " .. details)
         return nil
     end
@@ -555,18 +579,24 @@ end
 
 local function postInventory()
     if not routeReady then return false end
-    local data = LocalData:Get()
-    if not data or type(data.Pets) ~= "table" then return false end
-    local inventory = {Pets = copy(data.Pets)}
-    for _, key in ipairs({"Potions", "Powerups", "FishInventory", "RodInventory", "BaitInventory"}) do
-        if data[key] ~= nil then inventory[key] = copy(data[key]) end
+    if not inventorySnapshot then
+        local data = LocalData:Get()
+        if not data or type(data.Pets) ~= "table" then return false end
+        local inventory = {Pets = copy(data.Pets)}
+        for _, key in ipairs({"Potions", "Powerups", "FishInventory", "RodInventory", "BaitInventory"}) do
+            if data[key] ~= nil then inventory[key] = copy(data[key]) end
+        end
+        inventorySnapshot = {
+            snapshot_id = HttpService:GenerateGUID(false),
+            type = "inventory", time = os.time(), timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            placeId = game.PlaceId, jobId = game.JobId,
+            profile = {userid = LocalPlayer.UserId, username = LocalPlayer.Name, displayname = LocalPlayer.DisplayName},
+            inventory = inventory
+        }
     end
-    return api("POST", "/api/inventory", {
-        type = "inventory", time = os.time(), timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        placeId = game.PlaceId, jobId = game.JobId,
-        profile = {userid = LocalPlayer.UserId, username = LocalPlayer.Name, displayname = LocalPlayer.DisplayName},
-        inventory = inventory
-    }) == true
+    local saved = api("POST", "/api/inventory", inventorySnapshot, inventorySnapshot.snapshot_id) == true
+    if saved then inventorySnapshot = nil end
+    return saved
 end
 
 local function connect(signal, callback)
@@ -604,6 +634,7 @@ function bot.Stop()
     activeTrade = nil
     pendingRequest = nil
     policy = nil
+    inventorySnapshot = nil
     log("Stopped. Unsent transactions retained for restart in this client.")
 end
 
