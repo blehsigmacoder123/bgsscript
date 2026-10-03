@@ -1,0 +1,212 @@
+local LaunchOptions = ...
+local AUTH_KEYS = type(LaunchOptions) == "table" and LaunchOptions.AUTH_KEYS or {}
+assert(type(AUTH_KEYS) == "table", "Global: AUTH_KEYS must be a table.")
+local GIVEAWAY_USER_ID = 11754649377
+local GIVEAWAY_URL = "https://raw.githubusercontent.com/blehsigmacoder123/bgsscript/main/giveaway.txt"
+local GLOBAL_URL = "https://raw.githubusercontent.com/blehsigmacoder123/bgsscript/main/Global-main.txt"
+local BGS_URL = "http://51.77.216.96:6103/BGS-original.txt"
+local BGSI_URL = "http://51.77.216.96:6103/BGSI-original.txt"
+local CONFIG_URL = "http://51.77.216.96:6103/config.txt"
+local INGESTS = {
+	BGSI = {
+		INGEST_URL = "http://51.77.216.96:8097/api/v1/ingest",
+		AUTH_KEY = AUTH_KEYS.BGSI or "",
+		AUTH_HEADER = "Authorization",
+		AUTH_PREFIX = "Bearer ",
+		HEADERS = {},
+	},
+	BGS = {
+		INGEST_URL = "http://51.77.216.96:5754/api/v1/ingest",
+		AUTH_KEY = AUTH_KEYS.BGS or "",
+		AUTH_HEADER = "Authorization",
+		AUTH_PREFIX = "Bearer ",
+		HEADERS = {},
+	},
+	Giveaway = {
+        API_URL = "https://gw.bgsi.io",
+        INGEST_URL = "https://gw.bgsi.io/api/transactions",
+        AUTH_KEY = AUTH_KEYS.Giveaway or "",
+        AUTH_HEADER = "Authorization",
+        AUTH_PREFIX = "Bearer ",
+        HEADERS = {},
+        ENDPOINTS = {
+            allowedUsers = "https://gw.bgsi.io/api/allowed-users",
+            petAssignments = "https://gw.bgsi.io/api/pet-assignments",
+            transactions = "https://gw.bgsi.io/api/transactions",
+            inventory = "https://gw.bgsi.io/api/inventory"
+        }
+    },
+}
+local ROUTE_CHECK_INTERVAL = 420
+local BGS_MAIN_PLACE_ID = 2512643572
+local BGSI_MAIN_PLACE_ID = 85896571713843
+local BGS_PLACES = {[2512643572] = "main", [104280841513368] = "trading_hangout"}
+local BGSI_PLACES = {[85896571713843] = "original", [98046029518959] = "normal", [127738893422250] = "pro"}
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local environment = type(getgenv) == "function" and getgenv() or _G
+repeat task.wait() until game:IsLoaded() and Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+
+local function ingestSettings(gameName)
+	local ingest = INGESTS[gameName]
+	assert(type(ingest) == "table", "Global: missing ingest settings for " .. gameName)
+	assert(type(ingest.INGEST_URL) == "string" and ingest.INGEST_URL:match("^https?://[^/%s]+"),
+		"Global: set a full ingest URL for " .. gameName)
+	assert(type(ingest.AUTH_KEY) == "string" and ingest.AUTH_KEY ~= "", "Global: pass AUTH_KEYS." .. gameName .. " through the loader.")
+	assert(type(ingest.HEADERS) == "table", "Global: HEADERS must be a table for " .. gameName)
+	local headers = {}
+	for name, value in pairs(ingest.HEADERS) do
+		assert(type(name) == "string" and name:match("^[%w!#$%%&'*+.^_`|~%-]+$")
+			and type(value) == "string" and not value:find("[\r\n]"),
+			"Global: invalid ingest header for " .. gameName)
+		if name:lower() ~= "content-type" then headers[name] = value end
+	end
+	headers["Content-Type"] = "application/json"
+	if ingest.AUTH_KEY ~= "" then
+		assert(type(ingest.AUTH_HEADER) == "string" and ingest.AUTH_HEADER:match("^[%w!#$%%&'*+.^_`|~%-]+$")
+			and ingest.AUTH_HEADER:lower() ~= "content-type", "Global: invalid AUTH_HEADER for " .. gameName)
+		assert(type(ingest.AUTH_PREFIX) == "string" and not (ingest.AUTH_PREFIX .. ingest.AUTH_KEY):find("[\r\n]"),
+			"Global: invalid auth key or prefix for " .. gameName)
+		for name in pairs(headers) do
+			if name:lower() == ingest.AUTH_HEADER:lower() then headers[name] = nil end
+		end
+		headers[ingest.AUTH_HEADER] = ingest.AUTH_PREFIX .. ingest.AUTH_KEY
+	end
+	return ingest, headers
+end
+
+local function matchesUser(entry)
+	return tonumber(entry.userId) == LocalPlayer.UserId
+		or type(entry.username) == "string" and entry.username:lower() == LocalPlayer.Name:lower()
+end
+
+local function getUserSettings(config)
+	if type(config) ~= "table" or type(config.defaults) ~= "table" or type(config.users) ~= "table" then
+		return nil
+	end
+	for _, entry in ipairs(config.users) do
+		if type(entry) == "table" and matchesUser(entry) then
+			local settings = table.clone(config.defaults)
+			if type(entry.settings) == "table" then
+				for key, value in pairs(entry.settings) do settings[key] = value end
+			end
+			return settings
+		end
+	end
+end
+
+local function fetchConfig(waitForConfig)
+	while true do
+		local ok, body = pcall(game.HttpGet, game, CONFIG_URL)
+		if ok and type(body) == "string" then
+			local decodedOk, config = pcall(HttpService.JSONDecode, HttpService, body)
+			if decodedOk and getUserSettings(config) then return config end
+		end
+		if not waitForConfig then return nil end
+		warn("Global: waiting for a valid config entry for " .. LocalPlayer.Name)
+		task.wait(5)
+	end
+end
+
+local function configuredGame(config)
+	local settings = getUserSettings(config)
+	local value = settings and (settings.Game or settings.game)
+	if value == nil then return "BGSI" end
+	value = type(value) == "string" and value:upper() or nil
+	if value == "BGS" or value == "BGSI" then return value end
+	return nil
+end
+
+local function currentGame()
+	if BGS_PLACES[game.PlaceId] then return "BGS" end
+	if BGSI_PLACES[game.PlaceId] then return "BGSI" end
+	local shared = game:GetService("ReplicatedStorage"):FindFirstChild("Shared")
+	if shared and shared:FindFirstChild("Framework") then return "BGSI" end
+end
+
+
+local function launchGiveaway()
+    local ingest, ingestHeaders = ingestSettings("Giveaway")
+    if currentGame() ~= "BGSI" then
+        local queue = queue_on_teleport or queueonteleport
+            or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+        if type(queue) == "function" then
+            local resume = string.format(
+                'local chunk, err = loadstring(game:HttpGet(%q .. "?v=" .. tostring(os.time()))); assert(chunk, err); chunk({AUTH_KEYS = {Giveaway = %q}})',
+                GLOBAL_URL, ingest.AUTH_KEY
+            )
+            local queued = pcall(queue, resume)
+            if not queued then warn("Global: could not queue Giveaway restart.") end
+        end
+        local ok = pcall(TeleportService.Teleport, TeleportService, BGSI_MAIN_PLACE_ID, LocalPlayer)
+        if not ok then warn("Global: could not enter BGSI for Giveaway.") end
+        return
+    end
+    local payload, compileError = loadstring(game:HttpGet(GIVEAWAY_URL .. "?v=" .. tostring(os.time())), "Giveaway")
+    assert(payload, "Global: failed to compile Giveaway script: " .. tostring(compileError))
+    return payload({
+        game = "Giveaway",
+        API_URL = ingest.API_URL,
+        INGEST_URL = ingest.INGEST_URL,
+        INGEST_HEADERS = ingestHeaders,
+        ENDPOINTS = ingest.ENDPOINTS,
+        AUTH_KEY = ingest.AUTH_KEY,
+        INGEST_TOKEN = ingest.AUTH_KEY
+    })
+end
+
+if LocalPlayer.UserId == GIVEAWAY_USER_ID then
+    return launchGiveaway()
+end
+
+local function ensureRoute(config)
+	local targetGame = configuredGame(config)
+	if not targetGame then
+		return false, "missing Game setting"
+	end
+	if currentGame() == targetGame then return true, targetGame end
+	local placeId = targetGame == "BGS" and BGS_MAIN_PLACE_ID or BGSI_MAIN_PLACE_ID
+	local ok, err = pcall(TeleportService.Teleport, TeleportService, placeId, LocalPlayer)
+	if not ok then warn("Global: teleport failed: " .. tostring(err)) end
+	return false, targetGame
+end
+
+local Config = fetchConfig(true)
+local selectedGame = configuredGame(Config)
+assert(selectedGame, "Global: Game must be BGS or BGSI")
+local ingest, ingestHeaders = ingestSettings(selectedGame)
+local source = selectedGame == "BGS" and BGS_URL or BGSI_URL
+assert(type(source) == "string" and source:match("^https?://[^/%s]+"),
+	"Global: set a full script URL for " .. selectedGame)
+local routed, targetGame = ensureRoute(Config)
+if not routed then return end
+
+task.spawn(function()
+	while true do
+		task.wait(ROUTE_CHECK_INTERVAL)
+		local updatedConfig = fetchConfig(false)
+		if updatedConfig then
+			local inCorrectGame, gameName = ensureRoute(updatedConfig)
+			local checkRoute = inCorrectGame and environment[gameName .. "_ROUTE_CHECK"]
+			if type(checkRoute) == "function" then pcall(checkRoute) end
+		end
+	end
+end)
+
+local place = game.PlaceId
+local config = {
+	game = targetGame,
+	place = targetGame == "BGS" and BGS_PLACES[place] or BGSI_PLACES[place],
+	CONFIG_URL = CONFIG_URL,
+	CONFIG = Config,
+	INGEST_URL = ingest.INGEST_URL,
+	INGEST_HEADERS = ingestHeaders,
+	AUTH_KEY = ingest.AUTH_KEY,
+	INGEST_TOKEN = ingest.AUTH_KEY,
+}
+local payload, compileError = loadstring(game:HttpGet(source), targetGame .. "-original")
+assert(payload, "Global: failed to compile " .. targetGame .. " script: " .. tostring(compileError))
+return payload(config)
